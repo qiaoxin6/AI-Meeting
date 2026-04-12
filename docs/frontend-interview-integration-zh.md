@@ -3,8 +3,8 @@
 ## 1. 推荐调用链路
 1. 上传简历并抽题：`POST /api/xunzhi/v1/interview/sessions/{sessionId}/interview-questions`
 2. 拉取当前应答题：`GET /api/xunzhi/v1/interview/sessions/{sessionId}/next-question`
-3. 提交答案并拿下一题：  
-   文本答题推荐：`POST /api/xunzhi/v1/interview/sessions/{sessionId}/interview/answer-json`  
+3. 提交答案并拿下一题：
+   文本答题推荐：`POST /api/xunzhi/v1/interview/sessions/{sessionId}/interview/answer-json`
    语音答题使用：`POST /api/xunzhi/v1/interview/sessions/{sessionId}/interview/answer`
 4. 面试结束后落库：`POST /api/xunzhi/v1/interview/interview/record/save-from-redis/{sessionId}`
 
