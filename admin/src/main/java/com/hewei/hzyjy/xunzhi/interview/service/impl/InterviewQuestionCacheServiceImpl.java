@@ -25,7 +25,7 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 /**
- * 闂傚牄鍨奸惁顖涳紣濡偐澶勯悗娑櫳戝﹢鍥礉閳ュ磭鏉介柣婊勫鐞?
+ * 面试题缓存服务实现，负责面试题、建议、评分与流程状态的缓存读写。
  */
 @Slf4j
 @Service
@@ -38,52 +38,52 @@ public class InterviewQuestionCacheServiceImpl implements InterviewQuestionCache
     private final InterviewRadarService interviewRadarService;
     
     /**
-     * 闂傚牄鍨奸惁顖涳紣濡偐澶勯悗娑櫭晶鐘电磽閳?
+     * 面试题缓存键前缀。
      */
     private static final String INTERVIEW_QUESTIONS_KEY = "interview:questions:session:";
     
     /**
-     * 闂傚牄鍨奸惁顖氼嚈妤︽鍞寸紓鍌涙尭閻°劑宕滃鍥╃；
+     * 面试建议缓存键前缀。
      */
     private static final String INTERVIEW_SUGGESTIONS_KEY = "interview:suggestions:session:";
     
     /**
-     * 缂佺姭鍋撻柛妯烘閻﹀酣宕氶崱娆戝閻庢稒锚婢х姷绱撻埀?
+     * 简历评分缓存键前缀。
      */
     private static final String RESUME_SCORE_KEY = "interview:resume_score:session:";
 
     /**
-     * 缂佺姭鍋撻柛妯烘缁劑寮搁崟顐㈩嚙濞戞挸锕ｇ粭鍛村棘閸モ晝澶勯悗娑櫭晶鐘电磽閳ь剟濡?
+     * 简历上下文缓存键前缀。
      */
     private static final String RESUME_CONTEXT_KEY = "interview:resume_context:session:";
     
     /**
-     * 缂佷胶鍋為埀顑胯兌椤撴悂鎮堕崱姘辨闁告帒妫涚槐锔锯偓娑櫭晶鐘电磽閳?
+     * 仪态评分缓存键前缀。
      */
     private static final String DEMEANOR_SCORE_KEY = "interview:demeanor_score:session:";
     
     /**
-     * 闂傚牄鍨奸惁顖炲棘閻熺増鍊荤紓鍌涙尭閻°劑宕滃鍥╃；
+     * 面试方向缓存键前缀。
      */
     private static final String INTERVIEW_DIRECTION_KEY = "interview:direction:session:";
 
     /**
-     * Interview flow state key prefix.
+     * 面试流程状态缓存键前缀。
      */
     private static final String INTERVIEW_FLOW_KEY = "interview:flow:session:";
 
     /**
-     * Follow-up question cache key prefix.
+     * 追问问题缓存键前缀。
      */
     private static final String INTERVIEW_FOLLOW_UP_QUESTIONS_KEY = "interview:follow_up_questions:session:";
 
     /**
-     * Interview answer request-id key prefix for idempotency.
+     * 面试回答请求 ID（幂等）缓存键前缀。
      */
     private static final String INTERVIEW_ANSWER_REQUEST_KEY = "interview:answer:req:session:";
 
     /**
-     * Interview turns key prefix.
+     * 面试轮次日志缓存键前缀。
      */
     private static final String INTERVIEW_TURNS_KEY = "interview:turns:session:";
 
@@ -95,7 +95,7 @@ public class InterviewQuestionCacheServiceImpl implements InterviewQuestionCache
     private static final String FLOW_STATUS_COMPLETED = "COMPLETED";
     
     /**
-     * 缂傚倹鎸搁悺銊︽交閸ャ劍鍩傞柡鍐ㄧ埣濡潡鏁嶉崼婵堟瘓闁哄啳顔愮槐?
+     * 缓存默认过期时间（小时）。
      */
     private static final long CACHE_EXPIRE_HOURS = 24;
     
@@ -104,10 +104,10 @@ public class InterviewQuestionCacheServiceImpl implements InterviewQuestionCache
         try {
             String cacheKey = INTERVIEW_QUESTIONS_KEY + sessionId;
             
-            // 婵炴挸鎳樺▍搴ㄥ籍瑜忓▓鎴犵磽閹惧磭鎽?
+            // 覆盖写入前先清理旧缓存，避免历史数据残留。
             stringRedisTemplate.delete(cacheKey);
             
-            // 閻庢稒锚閸嬪秹寮幍顔界暠闂傚牄鍨奸惁顖涳紣濮楀牏绀夊ù锝堟硶閺併倖锛愬Ο鍝勫▏濞达絾绮堢拹鐒抜eld闁挎稑鐭傞。浠嬫儎椤旇崵绋婂☉鎾剁毉alue
+            // 将题目列表转换为 Hash 结构（题号 -> 题目内容）。
             Map<String, String> questionMap = new HashMap<>();
             for (int i = 0; i < questions.size(); i++) {
                 String questionNumber = String.valueOf(i + 1);
@@ -116,13 +116,13 @@ public class InterviewQuestionCacheServiceImpl implements InterviewQuestionCache
             
             if (!questionMap.isEmpty()) {
                 stringRedisTemplate.opsForHash().putAll(cacheKey, questionMap);
-                // 閻犱礁澧介悿鍡樻交閸ャ劍鍩傞柡鍐ㄧ埣濡?
+                // 设置缓存过期时间。
                 stringRedisTemplate.expire(cacheKey, CACHE_EXPIRE_HOURS, TimeUnit.HOURS);
             }
             
             log.info("Cached interview questions, sessionId: {}, count: {}", sessionId, questions.size());
         } catch (Exception e) {
-            log.error("缂傚倹鎸搁悺銊╂閵忥絿妲稿Λ鐗埫妵鎴犳嫻閵夘垳绀夊ù鍏间亢閻︾祤D: {}, 闂佹寧鐟ㄩ? {}", sessionId, e.getMessage(), e);
+            log.error("Interview cache service message", sessionId, e.getMessage(), e);
         }
     }
     
@@ -130,11 +130,9 @@ public class InterviewQuestionCacheServiceImpl implements InterviewQuestionCache
     public void cacheInterviewSuggestions(String sessionId, List<String> suggestions) {
         try {
             String cacheKey = INTERVIEW_SUGGESTIONS_KEY + sessionId;
-            
-            // 婵炴挸鎳樺▍搴ㄥ籍瑜忓▓鎴犵磽閹惧磭鎽?
+
             stringRedisTemplate.delete(cacheKey);
-            
-            // 閻庢稒锚閸嬪秹寮幍顔界暠闂傚牄鍨奸惁顖氼嚈妤︽鍞撮柨娑樺婵炲洭鎮介妸銉х处閻犱緡鍠氱槐顏堝矗閾氬倻绋婂☉鎾额嚡ield闁挎稑鑻紓鎾舵媼椤旂厧鏁堕悗褰掆偓娑氱▕濞戞挾鐨璦lue
+
             Map<String, String> suggestionMap = new HashMap<>();
             for (int i = 0; i < suggestions.size(); i++) {
                 String suggestionNumber = String.valueOf(i + 1);
@@ -143,13 +141,12 @@ public class InterviewQuestionCacheServiceImpl implements InterviewQuestionCache
             
             if (!suggestionMap.isEmpty()) {
                 stringRedisTemplate.opsForHash().putAll(cacheKey, suggestionMap);
-                // 閻犱礁澧介悿鍡樻交閸ャ劍鍩傞柡鍐ㄧ埣濡?
                 stringRedisTemplate.expire(cacheKey, CACHE_EXPIRE_HOURS, TimeUnit.HOURS);
             }
             
             log.info("Cached interview suggestions, sessionId: {}, count: {}", sessionId, suggestions.size());
         } catch (Exception e) {
-            log.error("缂傚倹鎸搁悺銊╂閵忥絿妲哥€点倝缂氶鍛緞鏉堫偉袝闁挎稑濂旂槐鎵嫚濠婄眹: {}, 闂佹寧鐟ㄩ? {}", sessionId, e.getMessage(), e);
+            log.error("Interview cache service message", sessionId, e.getMessage(), e);
         }
     }
     
@@ -157,15 +154,13 @@ public class InterviewQuestionCacheServiceImpl implements InterviewQuestionCache
     public void cacheResumeScore(String sessionId, Integer resumeScore) {
         try {
             String cacheKey = RESUME_SCORE_KEY + sessionId;
-            // 婵炴挸鎳樺▍搴ㄥ籍瑜忓▓鎴犵磽閹惧磭鎽?
             stringRedisTemplate.delete(cacheKey);
 
             stringRedisTemplate.opsForValue().set(cacheKey, resumeScore.toString());
-            // 閻犱礁澧介悿鍡樻交閸ャ劍鍩傞柡鍐ㄧ埣濡?
             stringRedisTemplate.expire(cacheKey, CACHE_EXPIRE_HOURS, TimeUnit.HOURS);
-            log.info("闁瑰瓨鍔曟慨娑氱磽閹惧磭鎽犲ù鍏间亢閻?{} 闁汇劌瀚悾婵嬪储閸℃氨妲戦柛? {}", sessionId, resumeScore);
+            log.info("Interview cache service message", sessionId, resumeScore);
         } catch (Exception e) {
-            log.error("缂傚倹鎸搁悺銊х不閳ь剟宕㈤崱姘辨闁告帒妫楅妵鎴犳嫻閵夘垳绀夊ù鍏间亢閻︾祤D: {}, 闂佹寧鐟ㄩ? {}", sessionId, e.getMessage(), e);
+            log.error("Interview cache service message", sessionId, e.getMessage(), e);
         }
     }
     
@@ -174,11 +169,10 @@ public class InterviewQuestionCacheServiceImpl implements InterviewQuestionCache
         try {
             String cacheKey = DEMEANOR_SCORE_KEY + sessionId;
             stringRedisTemplate.opsForValue().set(cacheKey, demeanorScore.toString());
-            // 閻犱礁澧介悿鍡樻交閸ャ劍鍩傞柡鍐ㄧ埣濡?
             stringRedisTemplate.expire(cacheKey, CACHE_EXPIRE_HOURS, TimeUnit.HOURS);
-            log.info("闁瑰瓨鍔曟慨娑氱磽閹惧磭鎽犲ù鍏间亢閻?{} 闁汇劌瀚〃锝夊箑娴ｄ警鍚€闁荤偛妫滈惁搴ㄥ礆? {}", sessionId, demeanorScore);
+            log.info("Interview cache service message", sessionId, demeanorScore);
         } catch (Exception e) {
-            log.error("缂傚倹鎸搁悺銊х矈閻愮补鍋撴担渚悁闁荤偛妫滈惁搴ㄥ礆閸℃ぜ浜奸悹鎰╁劵缁辨繃瀵煎宕囨▓ID: {}, 闂佹寧鐟ㄩ? {}", sessionId, e.getMessage(), e);
+            log.error("Interview cache service message", sessionId, e.getMessage(), e);
         }
     }
     
@@ -188,25 +182,25 @@ public class InterviewQuestionCacheServiceImpl implements InterviewQuestionCache
             String cacheKey = INTERVIEW_QUESTIONS_KEY + sessionId;
             Map<Object, Object> rawMap = stringRedisTemplate.opsForHash().entries(cacheKey);
             
-            // 濞达綀娉曢弫顥瞚nkedHashMap濞ｅ洦绻冪€垫棃骞撻幒鎴濆汲濡炪倕鎼花顓㈡晬鐏炲€熷珯闁圭顦甸。浠嬪矗闁垮绗撻幖?
+            // 使用 LinkedHashMap，保证排序后遍历顺序稳定。
             Map<String, String> questionMap = new LinkedHashMap<>();
             
-            // 閻忓繐妫濋。浠嬪矗閻ゎ垱绁柟璇℃線鐠愮喖寮€涙ɑ娈堕弶鈺傜椤㈡垿骞掗幒鎴犵
+            // 按题号排序返回，避免 Hash 无序导致前端展示顺序混乱。
             rawMap.entrySet().stream()
                 .sorted((entry1, entry2) -> {
                     try {
-                        // 闁圭粯鍔曡ぐ鍥紣濡搫濞囬弶鈺傜椤㈡垿寮弶璺ㄦ憻闁圭儤甯掔花?
+                        // 统一按字符串处理键，兼容不同序列化类型。
                         String key1 = entry1.getKey().toString();
                         String key2 = entry2.getKey().toString();
                         
-                        // 濠碘€冲€归悘澶嬶紣濡搫濞囬柡鍕靛灣閸戜粙寮弶璺ㄦ憻闁挎稑鏈€垫粓寮弶璺ㄦ憻闁圭儤甯掔花?
+                        // 两个键都是数字时按数值排序（如 2 < 10）。
                         if (key1.matches("\\d+") && key2.matches("\\d+")) {
                             return Integer.compare(Integer.parseInt(key1), Integer.parseInt(key2));
                         }
-                        // 闁告熬绠戦崹顖炲箰婢跺﹦鎽熺紒妤嬬細鐟曞棝骞掗幒鎴犵
+                        // 非数字键按字典序排序。
                         return key1.compareTo(key2);
                     } catch (NumberFormatException e) {
-                        // 濠碘€冲€归悘澶嬫姜椤掍礁搴婂鎯扮簿鐟欙箓鏁嶇仦鎯х樆閻庢稒顨堥浣圭▔閸欏绗撻幖?
+                        // 解析异常时回退到字符串比较，保证流程不中断。
                         return entry1.getKey().toString().compareTo(entry2.getKey().toString());
                     }
                 })
@@ -217,7 +211,7 @@ public class InterviewQuestionCacheServiceImpl implements InterviewQuestionCache
             log.info("Loaded interview questions from cache, sessionId: {}, count: {}", sessionId, questionMap.size());
             return questionMap;
         } catch (Exception e) {
-            log.error("闁兼儳鍢茶ぐ鍥ㄥ濮樺磭妯堥梻鍫涘灱閻︻垱锛愬Ο鎭掍杭閻犳劑鍎荤槐婵囧濮樺磭妯圛D: {}, 闂佹寧鐟ㄩ? {}", sessionId, e.getMessage(), e);
+            log.error("Interview cache service message", sessionId, e.getMessage(), e);
             return new HashMap<>();
         }
     }
@@ -251,9 +245,9 @@ public class InterviewQuestionCacheServiceImpl implements InterviewQuestionCache
             String payload = JSON.toJSONString(resumeContext);
             stringRedisTemplate.opsForValue().set(cacheKey, payload);
             stringRedisTemplate.expire(cacheKey, CACHE_EXPIRE_HOURS, TimeUnit.HOURS);
-            log.info("缂傚倹鎸搁悺銊х不閳ь剟宕㈤崱鏇犵憪濞戞挸顑嗛弸鍐箣閹邦剙顫犻柨娑橆啋essionId: {}, keys: {}", sessionId, resumeContext.keySet());
+            log.info("Interview cache service message", sessionId, resumeContext.keySet());
         } catch (Exception e) {
-            log.error("缂傚倹鎸搁悺銊х不閳ь剟宕㈤崱鏇犵憪濞戞挸顑嗛弸鍐╁緞鏉堫偉袝闁挎稑顔抏ssionId: {}, error: {}", sessionId, e.getMessage(), e);
+            log.error("Interview cache service message", sessionId, e.getMessage(), e);
         }
     }
 
@@ -272,7 +266,7 @@ public class InterviewQuestionCacheServiceImpl implements InterviewQuestionCache
             });
             return parsed == null ? new HashMap<>() : parsed;
         } catch (Exception e) {
-            log.error("闁兼儳鍢茶ぐ鍥╃不閳ь剟宕㈤崱鏇犵憪濞戞挸顑嗛弸鍐╁緞鏉堫偉袝闁挎稑顔抏ssionId: {}, error: {}", sessionId, e.getMessage(), e);
+            log.error("Interview cache service message", sessionId, e.getMessage(), e);
             return new HashMap<>();
         }
     }
@@ -337,25 +331,25 @@ public class InterviewQuestionCacheServiceImpl implements InterviewQuestionCache
             String cacheKey = INTERVIEW_SUGGESTIONS_KEY + sessionId;
             Map<Object, Object> rawMap = stringRedisTemplate.opsForHash().entries(cacheKey);
             
-            // 濞达綀娉曢弫顥瞚nkedHashMap濞ｅ洦绻冪€垫棃骞撻幒鎴濆汲濡炪倕鎼花顓㈡晬鐏炲€熷珯闁圭顦紓鎾舵媼椤斿墽妞介柛娆撴敱鐢挻鎯?
+            // 使用 LinkedHashMap，保证排序后遍历顺序稳定。
             Map<String, String> suggestionMap = new LinkedHashMap<>();
             
-            // 閻忓繐妫楃紓鎾舵媼椤斿墽妞介柛娆戞焿濞村棝骞戦～顓＄闁轰礁鐡ㄩ弳鐔告交濞戞粠鏀介柟鐑樺笒缁?
+            // 按编号排序返回，避免 Hash 无序导致前端展示顺序混乱。
             rawMap.entrySet().stream()
                 .sorted((entry1, entry2) -> {
                     try {
-                        // 闁圭粯鍔曡ぐ鍥ь嚈妤︽鍞寸紓鍌涚墪瑜版寧娼诲☉婊庢斀闁轰焦婢橀悺褔骞掗幒鎴犵
+                        // 统一按字符串处理键，兼容不同序列化类型。
                         String key1 = entry1.getKey().toString();
                         String key2 = entry2.getKey().toString();
                         
-                        // 濠碘€冲€归悘澶岀磽閺嵮冨▏闁哄嫷鍨抽崙浠嬪极閺夎法鎽熼柨娑樻湰鐎垫粓寮弶璺ㄦ憻闁圭儤甯掔花?
+                        // 两个键都是数字时按数值排序（如 2 < 10）。
                         if (key1.matches("\\d+") && key2.matches("\\d+")) {
                             return Integer.compare(Integer.parseInt(key1), Integer.parseInt(key2));
                         }
-                        // 闁告熬绠戦崹顖炲箰婢跺﹦鎽熺紒妤嬬細鐟曞棝骞掗幒鎴犵
+                        // 非数字键按字典序排序。
                         return key1.compareTo(key2);
                     } catch (NumberFormatException e) {
-                        // 濠碘€冲€归悘澶嬫姜椤掍礁搴婂鎯扮簿鐟欙箓鏁嶇仦鎯х樆閻庢稒顨堥浣圭▔閸欏绗撻幖?
+                        // 解析异常时回退到字符串比较，保证流程不中断。
                         return entry1.getKey().toString().compareTo(entry2.getKey().toString());
                     }
                 })
@@ -366,7 +360,7 @@ public class InterviewQuestionCacheServiceImpl implements InterviewQuestionCache
             log.info("Loaded interview suggestions from cache, sessionId: {}, count: {}", sessionId, suggestionMap.size());
             return suggestionMap;
         } catch (Exception e) {
-            log.error("闁兼儳鍢茶ぐ鍥ㄥ濮樺磭妯堥梻鍫涘灱閻︻垰顕欐ウ娆惧敶濠㈡儼绮剧憴锕傛晬鐏炶偐绐楅悹鍥ㄦ崲D: {}, 闂佹寧鐟ㄩ? {}", sessionId, e.getMessage(), e);
+            log.error("Interview cache service message", sessionId, e.getMessage(), e);
             return new HashMap<>();
         }
     }
@@ -382,7 +376,7 @@ public class InterviewQuestionCacheServiceImpl implements InterviewQuestionCache
             }
             return question != null ? question.toString() : null;
         } catch (Exception e) {
-            log.error("闁兼儳鍢茶ぐ鍥紣濡吋绐楀鎯扮簿鐟欙箓鏁嶇仦鑲╃獥閻犲洦鎹: {}, 濡増锚瑜? {}, 闂佹寧鐟ㄩ? {}", sessionId, questionNumber, e.getMessage(), e);
+            log.error("Interview cache service message", sessionId, questionNumber, e.getMessage(), e);
             return null;
         }
     }
@@ -395,7 +389,7 @@ public class InterviewQuestionCacheServiceImpl implements InterviewQuestionCache
             stringRedisTemplate.delete(List.of(cacheKey, followUpCacheKey));
             log.info("Cleared interview question cache, sessionId: {}", sessionId);
         } catch (Exception e) {
-            log.error("婵炴挸鎳樺▍搴ㄦ閵忥絿妲稿Λ鐗堫焽缁憋妇鈧稒锚閵囨垹鎷归妷顖滅濞村吋淇洪惁绲€D: {}, 闂佹寧鐟ㄩ? {}", sessionId, e.getMessage(), e);
+            log.error("Interview cache service message", sessionId, e.getMessage(), e);
         }
     }
     
@@ -406,13 +400,13 @@ public class InterviewQuestionCacheServiceImpl implements InterviewQuestionCache
             stringRedisTemplate.delete(cacheKey);
             log.info("Cleared interview suggestion cache, sessionId: {}", sessionId);
         } catch (Exception e) {
-            log.error("婵炴挸鎳樺▍搴ㄦ閵忥絿妲哥€点倝缂氶鍛磽閹惧磭鎽犲鎯扮簿鐟欙箓鏁嶇仦鑲╃獥閻犲洦鎹: {}, 闂佹寧鐟ㄩ? {}", sessionId, e.getMessage(), e);
+            log.error("Interview cache service message", sessionId, e.getMessage(), e);
         }
     }
     
     /**
-     * 濞寸姴瀛╅弳鐔煎箲椤旇偐姘ㄩ柛鏃傚Ь濞村洭妫冮姀锝囨Ц濡増锚閸╁瞼绱撻幘宕囨憼
-     * 濞村吋锚閸樻稒鎷呯捄銊︽殢JSON闁哄秶鍘х槐锟犲极閻楀牆绁﹂柨娑樿嫰椤┭囧几濠娾偓缁楀鈧稒锚濠€顏堝礆濞嗗骸鈻忛柣鈶╁晸ist闁哄秶鍘х槐锟犲极閻楀牆绁?
+     * 从数据库加载面试题到缓存。
+     * 优先解析 questionsJson，解析失败时回退到 questions 列表。
      */
     public void loadInterviewQuestionsFromDatabase(String sessionId) {
         try {
@@ -422,7 +416,7 @@ public class InterviewQuestionCacheServiceImpl implements InterviewQuestionCache
                 return;
             }
             
-            // 濞村吋锚閸樻稒鎷呯捄銊︽殢JSON闁哄秶鍘х槐锟犲极閻楀牆绁?
+            // 优先使用 JSON 字段恢复题目（保留题号）。
             if (StrUtil.isNotBlank(question.getQuestionsJson())) {
                 try {
                     Map<String, String> questionsMap = JSON.parseObject(
@@ -438,27 +432,27 @@ public class InterviewQuestionCacheServiceImpl implements InterviewQuestionCache
                         stringRedisTemplate.expire(cacheKey, CACHE_EXPIRE_HOURS, TimeUnit.HOURS);
                     }
                     
-                    log.info("濞寸姴瀛╅弳鐔煎箲椤旇偐姘↗SON闁哄秶鍘х槐锟犲礉閻樼儤绁伴梻鍫涘灱閻︻垱锛愬Ο鍝勭厒缂傚倹鎸搁悺銊╁箣閹邦剙顫犻柨娑樺缁辨壆鎷犲绫? {}, 濡増顭囧ú浼村极娴兼潙娅? {}", sessionId, questionsMap.size());
+                    log.info("Interview cache service message", sessionId, questionsMap.size());
                     return;
                 } catch (Exception e) {
-                    log.warn("閻熸瑱绲鹃悗浠嬫閵忥絿妲稿Λ鐗堛偗SON闁轰胶澧楀畵浣瑰緞鏉堫偉袝闁挎稑鑻惃鍓ф嫚閺囨艾鈻忛柣鈶╁晸ist闁哄秶鍘х槐锟犲极閻楀牆绁﹂柨娑樼焸閺佸﹦鎷? {}", e.getMessage());
+                    log.warn("Interview cache service message", e.getMessage());
                 }
             }
             
-            // 濠碘€冲€归悘濉塖ON闁哄秶鍘х槐锟犲极閻楀牆绁﹀☉鎾崇Т閻°劑宕烽妸锕€鐏楅悷娆欑稻閻庤姤寰勬潏顐バ曢柨娑樺婵炲洭鎮介埆妾宻t闁哄秶鍘х槐锟犲极閻楀牆绁?
+            // JSON 不可用时回退到列表字段写入缓存。
             if (question.getQuestions() != null && !question.getQuestions().isEmpty()) {
                 cacheInterviewQuestions(sessionId, question.getQuestions());
-                log.info("濞寸姴瀛╅弳鐔煎箲椤旇偐姘↙ist闁哄秶鍘х槐锟犲礉閻樼儤绁伴梻鍫涘灱閻︻垱锛愬Ο鍝勭厒缂傚倹鎸搁悺銊╁箣閹邦剙顫犻柨娑樺缁辨壆鎷犲绫? {}, 濡増顭囧ú浼村极娴兼潙娅? {}", sessionId, question.getQuestions().size());
+                log.info("Interview cache service message", sessionId, question.getQuestions().size());
             }
             
         } catch (Exception e) {
-            log.error("濞寸姴瀛╅弳鐔煎箲椤旇偐姘ㄩ柛鏃傚Ь濞村洭妫冮姀锝囨Ц濡増锚閸╁瞼绱撻幘宕囨憼濠㈡儼绮剧憴锕傛晬鐏炶偐绐楅悹鍥ㄦ崲D: {}, 闂佹寧鐟ㄩ? {}", sessionId, e.getMessage(), e);
+            log.error("Interview cache service message", sessionId, e.getMessage(), e);
         }
     }
     
     /**
-     * 濞寸姴瀛╅弳鐔煎箲椤旇偐姘ㄩ柛鏃傚Ь濞村洭妫冮姀锝囨Ц鐎点倝缂氶鍛村礆閹殿喚澶勯悗?
-     * 濞村吋锚閸樻稒鎷呯捄銊︽殢JSON闁哄秶鍘х槐锟犲极閻楀牆绁﹂柨娑樿嫰椤┭囧几濠娾偓缁楀鈧稒锚濠€顏堝礆濞嗗骸鈻忛柣鈶╁晸ist闁哄秶鍘х槐锟犲极閻楀牆绁?
+     * 从数据库加载面试建议到缓存。
+     * 优先解析 suggestionsJson，解析失败时回退到 suggestions 列表。
      */
     public void loadInterviewSuggestionsFromDatabase(String sessionId) {
         try {
@@ -468,7 +462,7 @@ public class InterviewQuestionCacheServiceImpl implements InterviewQuestionCache
                 return;
             }
             
-            // 濞村吋锚閸樻稒鎷呯捄銊︽殢JSON闁哄秶鍘х槐锟犲极閻楀牆绁?
+            // 优先使用 JSON 字段恢复建议（保留编号）。
             if (StrUtil.isNotBlank(question.getSuggestionsJson())) {
                 try {
                     Map<String, String> suggestionsMap = JSON.parseObject(
@@ -484,26 +478,26 @@ public class InterviewQuestionCacheServiceImpl implements InterviewQuestionCache
                         stringRedisTemplate.expire(cacheKey, CACHE_EXPIRE_HOURS, TimeUnit.HOURS);
                     }
                     
-                    log.info("濞寸姴瀛╅弳鐔煎箲椤旇偐姘↗SON闁哄秶鍘х槐锟犲礉閻樼儤绁伴梻鍫涘灱閻︻垰顕欐ウ娆惧敶闁告帗澹嗙槐锔锯偓娑櫳戦崹姘跺礉閻曞倻绀夊ù鍏间亢閻︾祤D: {}, 鐎点倝缂氶鍛村极娴兼潙娅? {}", sessionId, suggestionsMap.size());
+                    log.info("Interview cache service message", sessionId, suggestionsMap.size());
                     return;
                 } catch (Exception e) {
-                    log.warn("閻熸瑱绲鹃悗浠嬫閵忥絿妲哥€点倝缂氶鍖ON闁轰胶澧楀畵浣瑰緞鏉堫偉袝闁挎稑鑻惃鍓ф嫚閺囨艾鈻忛柣鈶╁晸ist闁哄秶鍘х槐锟犲极閻楀牆绁﹂柨娑樼焸閺佸﹦鎷? {}", e.getMessage());
+                    log.warn("Interview cache service message", e.getMessage());
                 }
             }
             
-            // 濠碘€冲€归悘濉塖ON闁哄秶鍘х槐锟犲极閻楀牆绁﹀☉鎾崇Т閻°劑宕烽妸锕€鐏楅悷娆欑稻閻庤姤寰勬潏顐バ曢柨娑樺婵炲洭鎮介埆妾宻t闁哄秶鍘х槐锟犲极閻楀牆绁?
+            // JSON 不可用时回退到列表字段写入缓存。
             if (question.getSuggestions() != null && !question.getSuggestions().isEmpty()) {
                 cacheInterviewSuggestions(sessionId, question.getSuggestions());
-                log.info("濞寸姴瀛╅弳鐔煎箲椤旇偐姘↙ist闁哄秶鍘х槐锟犲礉閻樼儤绁伴梻鍫涘灱閻︻垰顕欐ウ娆惧敶闁告帗澹嗙槐锔锯偓娑櫳戦崹姘跺礉閻曞倻绀夊ù鍏间亢閻︾祤D: {}, 鐎点倝缂氶鍛村极娴兼潙娅? {}", sessionId, question.getSuggestions().size());
+                log.info("Interview cache service message", sessionId, question.getSuggestions().size());
             }
             
         } catch (Exception e) {
-            log.error("濞寸姴瀛╅弳鐔煎箲椤旇偐姘ㄩ柛鏃傚Ь濞村洭妫冮姀锝囨Ц鐎点倝缂氶鍛村礆閹殿喚澶勯悗娑櫭妵鎴犳嫻閵夘垳绀夊ù鍏间亢閻︾祤D: {}, 闂佹寧鐟ㄩ? {}", sessionId, e.getMessage(), e);
+            log.error("Interview cache service message", sessionId, e.getMessage(), e);
         }
     }
     
     /**
-     * 濞寸姴瀛╅弳鐔煎箲椤旇偐姘ㄩ柛鏃傚Ь濞村洨绮婚埀顒勫储閸℃氨妲戦柛鎺戞閸╁瞼绱撻幘宕囨憼
+     * 从数据库加载简历评分到缓存。
      */
     public void loadResumeScoreFromDatabase(String sessionId) {
         try {
@@ -514,10 +508,10 @@ public class InterviewQuestionCacheServiceImpl implements InterviewQuestionCache
             }
             
             cacheResumeScore(sessionId, question.getResumeScore());
-            log.info("濞寸姴瀛╅弳鐔煎箲椤旇偐姘ㄩ柛鏃傚Ь濞村洨绮婚埀顒勫储閸℃氨妲戦柛鎺戞閸╁瞼绱撻幘宕囨憼闁瑰瓨鍔曟慨娑㈡晬鐏炶偐绐楅悹鍥ㄦ崲D: {}, 閻犲洤瀚崹? {}", sessionId, question.getResumeScore());
+            log.info("Interview cache service message", sessionId, question.getResumeScore());
             
         } catch (Exception e) {
-            log.error("濞寸姴瀛╅弳鐔煎箲椤旇偐姘ㄩ柛鏃傚Ь濞村洨绮婚埀顒勫储閸℃氨妲戦柛鎺戞閸╁瞼绱撻幘宕囨憼濠㈡儼绮剧憴锕傛晬鐏炶偐绐楅悹鍥ㄦ崲D: {}, 闂佹寧鐟ㄩ? {}", sessionId, e.getMessage(), e);
+            log.error("Interview cache service message", sessionId, e.getMessage(), e);
         }
     }
     
@@ -526,7 +520,7 @@ public class InterviewQuestionCacheServiceImpl implements InterviewQuestionCache
         try {
             return interviewScoreService.getSessionTotalScore(sessionId, getInterviewTurns(sessionId));
         } catch (Exception e) {
-            log.error("闁兼儳鍢茶ぐ鍥ㄥ濮樺磭妯堥柟顒冾嚙閸ㄥ孩寰勬潏顐バ曢柨娑樺缁辨壆鎷犲绫? {}, 闂佹寧鐟ㄩ? {}", sessionId, e.getMessage(), e);
+            log.error("Interview cache service message", sessionId, e.getMessage(), e);
             return 0;
         }
     }
@@ -535,10 +529,10 @@ public class InterviewQuestionCacheServiceImpl implements InterviewQuestionCache
     public Integer addSessionScore(String sessionId, Integer score) {
         try {
             Integer total = interviewScoreService.addSessionScore(sessionId, score);
-            log.info("濞村吋淇洪惁?{} 闁哄牜鍓氶鐓庮嚗濡も偓閸? {}, 缂侀硸鍨甸鎼佸箑鐠囨彃鐎? {}", sessionId, score, total);
+            log.info("Interview cache service message", sessionId, score, total);
             return total;
         } catch (Exception e) {
-            log.error("缂侀硸鍨版慨鐐村濮樺磭妯堥柛鎺戞閺嗙喐寰勬潏顐バ曢柨娑樺缁辨壆鎷犲绫? {}, 闁告帒妫欓弳? {}, 闂佹寧鐟ㄩ? {}", sessionId, score, e.getMessage(), e);
+            log.error("Interview cache service message", sessionId, score, e.getMessage(), e);
             return getSessionTotalScore(sessionId);
         }
     }
@@ -549,7 +543,7 @@ public class InterviewQuestionCacheServiceImpl implements InterviewQuestionCache
             interviewScoreService.resetSessionScore(sessionId);
             log.info("Reset session score, sessionId: {}", sessionId);
         } catch (Exception e) {
-            log.error("闂佹彃绉堕悿鍡樺濮樺磭妯堥柛鎺戞閺嗙喐寰勬潏顐バ曢柨娑樺缁辨壆鎷犲绫? {}, 闂佹寧鐟ㄩ? {}", sessionId, e.getMessage(), e);
+            log.error("Interview cache service message", sessionId, e.getMessage(), e);
         }
     }
 
@@ -586,7 +580,7 @@ public class InterviewQuestionCacheServiceImpl implements InterviewQuestionCache
             stringRedisTemplate.opsForValue().set(emoticonKey, emoticonHandling.toString());
             stringRedisTemplate.opsForValue().set(compositeKey, compositeScore.toString());
             
-            // 閻犱礁澧介悿鍡樻交閸ャ劍鍩傞柡鍐ㄧ埣濡?
+            // 四个维度评分统一设置过期时间。
             stringRedisTemplate.expire(panicKey, CACHE_EXPIRE_HOURS, TimeUnit.HOURS);
             stringRedisTemplate.expire(seriousnessKey, CACHE_EXPIRE_HOURS, TimeUnit.HOURS);
             stringRedisTemplate.expire(emoticonKey, CACHE_EXPIRE_HOURS, TimeUnit.HOURS);
@@ -594,7 +588,7 @@ public class InterviewQuestionCacheServiceImpl implements InterviewQuestionCache
             
             log.info("Cached demeanor score details, sessionId: {}", sessionId);
         } catch (Exception e) {
-            log.error("缂傚倹鎸搁悺銊х矈閻愮补鍋撴担鐣屾闁告帒妫滈娑氱磼閸℃ɑ娈堕柟璇″枛閵囨垹鎷归妷顖滅濞村吋淇洪惁绲€D: {}, 闂佹寧鐟ㄩ? {}", sessionId, e.getMessage(), e);
+            log.error("Interview cache service message", sessionId, e.getMessage(), e);
         }
     }
     
@@ -618,11 +612,11 @@ public class InterviewQuestionCacheServiceImpl implements InterviewQuestionCache
         try {
             String cacheKey = INTERVIEW_DIRECTION_KEY + sessionId;
             stringRedisTemplate.opsForValue().set(cacheKey, interviewDirection);
-            // 閻犱礁澧介悿鍡樻交閸ャ劍鍩傞柡鍐ㄧ埣濡?
+            // 设置缓存过期时间。
             stringRedisTemplate.expire(cacheKey, CACHE_EXPIRE_HOURS, TimeUnit.HOURS);
-            log.info("闁瑰瓨鍔曟慨娑氱磽閹惧磭鎽犲ù鍏间亢閻?{} 闁汇劌瀚板鎵嫚閺囩喐鐓欓柛? {}", sessionId, interviewDirection);
+            log.info("Interview cache service message", sessionId, interviewDirection);
         } catch (Exception e) {
-            log.error("缂傚倹鎸搁悺銊╂閵忥絿妲搁柡鍌滄嚀閹粍寰勬潏顐バ曢柨娑樺缁辨壆鎷犲绫? {}, 闂佹寧鐟ㄩ? {}", sessionId, e.getMessage(), e);
+            log.error("Interview cache service message", sessionId, e.getMessage(), e);
         }
     }
     
@@ -631,10 +625,10 @@ public class InterviewQuestionCacheServiceImpl implements InterviewQuestionCache
         try {
             String cacheKey = INTERVIEW_DIRECTION_KEY + sessionId;
             String direction = stringRedisTemplate.opsForValue().get(cacheKey);
-            log.info("闁兼儳鍢茶ぐ鍥ㄥ濮樺磭妯?{} 闁汇劌瀚板鎵嫚閺囩喐鐓欓柛? {}", sessionId, direction);
+            log.info("Interview cache service message", sessionId, direction);
             return direction;
         } catch (Exception e) {
-            log.error("闁兼儳鍢茶ぐ鍥ㄥ濮樺磭妯堥梻鍫涘灱閻︻垶寮悷鐗堝€诲鎯扮簿鐟欙箓鏁嶇仦鑲╃獥閻犲洦鎹: {}, 闂佹寧鐟ㄩ? {}", sessionId, e.getMessage(), e);
+            log.error("Interview cache service message", sessionId, e.getMessage(), e);
             return null;
         }
     }
