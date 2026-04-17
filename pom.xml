@@ -191,9 +191,6 @@
           <formats>
             <format>
               <includes>
-                <include>*.md</include>
-                <include>docs/**/*.md</include>
-                <include>.github/**/*.md</include>
                 <include>.github/**/*.yml</include>
                 <include>.github/**/*.yaml</include>
                 <include>*.yml</include>
