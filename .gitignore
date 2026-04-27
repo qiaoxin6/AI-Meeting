@@ -77,3 +77,8 @@ docs/interview-ai-session-heavy-lock-design-zh.md
 .gitignore
 docs/interview-ai-demeanor-request-full-link-zh.md
 docs/interview-ai-ownertoken-design-details-zh.md
+docs/interview-chain-backend-*.md
+docs/interview-redis-resume-optimization-zh.md
+docs/interview-service-current-flow-zh.md
+docs/interview-session-*.md
+docs/realtime-asr-chain/*.md

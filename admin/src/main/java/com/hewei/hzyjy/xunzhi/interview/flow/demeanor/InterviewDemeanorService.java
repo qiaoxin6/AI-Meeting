@@ -12,6 +12,7 @@ import com.hewei.hzyjy.xunzhi.interview.application.guard.core.InterviewAiGuardE
 import com.hewei.hzyjy.xunzhi.interview.application.guard.core.InterviewAiGuardException;
 import com.hewei.hzyjy.xunzhi.interview.application.guard.core.InterviewAiGuardStage;
 import com.hewei.hzyjy.xunzhi.interview.application.guard.lock.InterviewAiSessionLockService;
+import com.hewei.hzyjy.xunzhi.interview.application.runtime.InterviewSessionRuntimeSnapshotService;
 import com.hewei.hzyjy.xunzhi.interview.application.strategy.DemeanorNormalizationStrategy;
 import com.hewei.hzyjy.xunzhi.interview.shared.InterviewAiInvoker;
 import com.hewei.hzyjy.xunzhi.interview.shared.InterviewResponseParser;
@@ -45,6 +46,7 @@ public class InterviewDemeanorService {
     private final InterviewAiSessionLockService interviewAiSessionLockService;
     private final InterviewResponseParser interviewResponseParser;
     private final DemeanorNormalizationStrategy demeanorNormalizationStrategy;
+    private final InterviewSessionRuntimeSnapshotService runtimeSnapshotService;
 
     public String evaluateDemeanor(DemeanorEvaluationReqDTO reqDTO) {
         String sessionId = null;
@@ -155,6 +157,7 @@ public class InterviewDemeanorService {
                             sessionId, normalizedPanic, normalizedSeriousness, normalizedEmoticon, normalizedComposite
                     );
                     interviewQuestionCacheService.cacheDemeanorScore(sessionId, normalizedComposite);
+                    runtimeSnapshotService.refreshAfterDemeanorEvaluated(sessionId);
                     log.info("Demeanor score success, sessionId={}, panic={}, seriousness={}, emoticon={}, composite={}",
                             sessionId, normalizedPanic, normalizedSeriousness, normalizedEmoticon, normalizedComposite);
                     return "Demeanor evaluation completed";

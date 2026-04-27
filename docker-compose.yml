@@ -51,6 +51,7 @@ services:
       retries: 10
 
   backend:
+    image: ${BACKEND_IMAGE:-ai-meeting-backend:latest}
     build:
       context: .
       dockerfile: Dockerfile

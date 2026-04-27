@@ -10,11 +10,16 @@ import com.hewei.hzyjy.xunzhi.interview.api.io.resp.InterviewAnswerRespDTO;
 import com.hewei.hzyjy.xunzhi.interview.shared.InterviewResponseParser;
 import com.hewei.hzyjy.xunzhi.interview.application.flow.InterviewFlowStateMachine;
 import com.hewei.hzyjy.xunzhi.interview.application.guard.core.InterviewAiGuardException;
+import com.hewei.hzyjy.xunzhi.interview.application.runtime.InterviewRuntimeRehydrateScope;
+import com.hewei.hzyjy.xunzhi.interview.application.runtime.InterviewSessionRuntimeRehydrateService;
+import com.hewei.hzyjy.xunzhi.interview.application.runtime.InterviewSessionRuntimeSnapshotService;
+import com.hewei.hzyjy.xunzhi.interview.application.runtime.InterviewSessionRuntimeView;
 import com.hewei.hzyjy.xunzhi.interview.application.rule.InterviewFollowUpRuleContext;
 import com.hewei.hzyjy.xunzhi.interview.application.rule.InterviewFollowUpRuleDecision;
 import com.hewei.hzyjy.xunzhi.interview.application.rule.InterviewFollowUpRuleService;
 import com.hewei.hzyjy.xunzhi.interview.service.InterviewQuestionCacheService;
 import com.hewei.hzyjy.xunzhi.interview.service.model.InterviewFlowState;
+import com.hewei.hzyjy.xunzhi.interview.service.model.InterviewRuntimeLoadMode;
 import com.hewei.hzyjy.xunzhi.interview.service.model.InterviewTurnLog;
 import io.micrometer.core.instrument.Metrics;
 import lombok.RequiredArgsConstructor;
@@ -45,6 +50,8 @@ public class InterviewAnswerPipeline {
     private final InterviewQuestionLockService interviewQuestionLockService;
     private final InterviewFollowUpRuleService interviewFollowUpRuleService;
     private final InterviewTurnRepairService interviewTurnRepairService;
+    private final InterviewSessionRuntimeSnapshotService runtimeSnapshotService;
+    private final InterviewSessionRuntimeRehydrateService runtimeRehydrateService;
 
     public InterviewAnswerRespDTO execute(String sessionId, InterviewAnswerReqDTO requestParam) {
         InterviewAnswerPipelineContext ctx = new InterviewAnswerPipelineContext();
@@ -109,6 +116,9 @@ public class InterviewAnswerPipeline {
             }
             interviewAnswerIdempotencyService.markSucceeded(ctx.sessionId, ctx.requestId, ctx.response);
             ctx.idempotencyMarkedSucceeded = true;
+            if (ctx.turnLog != null) {
+                runtimeSnapshotService.refreshAfterAnswerCommitted(ctx.sessionId, ctx.requestId, ctx.turnLog);
+            }
         }
         return ctx.response;
     }
@@ -166,6 +176,18 @@ public class InterviewAnswerPipeline {
             }
             case NEW -> {
                 ctx.idempotencyStarted = true;
+                InterviewAnswerRespDTO replayResponse = runtimeSnapshotService.findReplayResponse(
+                        ctx.sessionId,
+                        ctx.requestId,
+                        ctx.requestParam.getQuestionNumber(),
+                        ctx.requestParam.getAnswerContent()
+                );
+                if (replayResponse != null) {
+                    interviewAnswerIdempotencyService.markSucceeded(ctx.sessionId, ctx.requestId, replayResponse);
+                    ctx.idempotencyMarkedSucceeded = true;
+                    ctx.response = replayResponse;
+                    return false;
+                }
                 return true;
             }
             default -> {
@@ -188,6 +210,15 @@ public class InterviewAnswerPipeline {
     }
 
     private boolean stepLoadCurrentQuestion(InterviewAnswerPipelineContext ctx) {
+        InterviewSessionRuntimeView runtimeView = runtimeRehydrateService.ensureRuntime(
+                ctx.sessionId,
+                InterviewRuntimeLoadMode.READ_WRITE_REQUIRED,
+                InterviewRuntimeRehydrateScope.HOT_RUNTIME
+        );
+        if (runtimeView != null && !runtimeView.canWrite() && !runtimeView.isTerminal()) {
+            ctx.response.fail("interview runtime restored as read-only");
+            return false;
+        }
         ctx.flowState = ensureInterviewFlow(ctx.sessionId);
         if (ctx.flowState == null) {
             ctx.response.fail("interview flow not initialized");

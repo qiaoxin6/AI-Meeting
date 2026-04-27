@@ -8,12 +8,15 @@ import com.hewei.hzyjy.xunzhi.interview.api.io.resp.InterviewAnswerRespDTO;
 import com.hewei.hzyjy.xunzhi.interview.api.io.resp.InterviewQuestionRespDTO;
 import com.hewei.hzyjy.xunzhi.interview.application.InterviewWorkflowService;
 import com.hewei.hzyjy.xunzhi.interview.application.flow.InterviewFlowStateMachine;
+import com.hewei.hzyjy.xunzhi.interview.application.runtime.InterviewSessionRuntimeRehydrateService;
+import com.hewei.hzyjy.xunzhi.interview.application.runtime.InterviewRuntimeRehydrateScope;
 import com.hewei.hzyjy.xunzhi.interview.flow.answer.InterviewAnswerPipeline;
 import com.hewei.hzyjy.xunzhi.interview.flow.answer.InterviewQuestionLockService;
 import com.hewei.hzyjy.xunzhi.interview.flow.demeanor.InterviewDemeanorService;
 import com.hewei.hzyjy.xunzhi.interview.flow.extraction.InterviewQuestionExtractionService;
 import com.hewei.hzyjy.xunzhi.interview.service.InterviewQuestionCacheService;
 import com.hewei.hzyjy.xunzhi.interview.service.model.InterviewFlowState;
+import com.hewei.hzyjy.xunzhi.interview.service.model.InterviewRuntimeLoadMode;
 import com.hewei.hzyjy.xunzhi.interview.service.model.InterviewTurnLog;
 import io.micrometer.core.instrument.Metrics;
 import lombok.RequiredArgsConstructor;
@@ -38,6 +41,7 @@ public class InterviewAgentOrchestrationService implements InterviewWorkflowServ
     private final InterviewAnswerPipeline interviewAnswerPipeline;
     private final InterviewFlowStateMachine interviewFlowStateMachine;
     private final InterviewQuestionLockService interviewQuestionLockService;
+    private final InterviewSessionRuntimeRehydrateService runtimeRehydrateService;
 
     public InterviewQuestionRespDTO extractInterviewQuestions(InterviewQuestionReqDTO reqDTO) {
         // 编排入口：提取链路直接委托 extraction flow。
@@ -68,6 +72,11 @@ public class InterviewAgentOrchestrationService implements InterviewWorkflowServ
         }
 
         try {
+            runtimeRehydrateService.ensureRuntime(
+                    sessionId,
+                    InterviewRuntimeLoadMode.READ_WRITE_REQUIRED,
+                    InterviewRuntimeRehydrateScope.FLOW_ONLY
+            );
             // 1) 先保证题库可用（缓存 miss 时从 DB 回补）。
             Map<String, String> questions = getOrLoadQuestions(sessionId);
             if (questions == null || questions.isEmpty()) {

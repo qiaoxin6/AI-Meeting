@@ -9,12 +9,14 @@ import com.hewei.hzyjy.xunzhi.agent.application.BusinessAgentScene;
 import com.hewei.hzyjy.xunzhi.interview.api.io.req.InterviewConversationPageReqDTO;
 import com.hewei.hzyjy.xunzhi.interview.api.io.resp.InterviewConversationRespDTO;
 import com.hewei.hzyjy.xunzhi.interview.api.io.resp.InterviewSessionCreateRespDTO;
+import com.hewei.hzyjy.xunzhi.interview.application.runtime.InterviewSessionRuntimeSnapshotService;
 import com.hewei.hzyjy.xunzhi.interview.application.InterviewSessionOwnershipService;
 import com.hewei.hzyjy.xunzhi.interview.dao.entity.InterviewSession;
 import com.hewei.hzyjy.xunzhi.interview.dao.repository.InterviewSessionRepository;
 import com.hewei.hzyjy.xunzhi.interview.service.InterviewSessionService;
 import com.hewei.hzyjy.xunzhi.interview.service.model.InterviewSessionStatus;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.BeanUtils;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
@@ -31,6 +33,7 @@ public class InterviewSessionServiceImpl implements InterviewSessionService {
     private final InterviewSessionRepository interviewSessionRepository;
     private final InterviewSessionOwnershipService ownershipService;
     private final BusinessAgentResolver businessAgentResolver;
+    private final ObjectProvider<InterviewSessionRuntimeSnapshotService> runtimeSnapshotServiceProvider;
 
     @Override
     public InterviewSessionCreateRespDTO createSession(Long userId) {
@@ -45,6 +48,10 @@ public class InterviewSessionServiceImpl implements InterviewSessionService {
                 businessAgentResolver.resolveRequired(BusinessAgentScene.INTERVIEW_QUESTION_ASKING).getId());
         session.setDelFlag(0);
         interviewSessionRepository.save(session);
+        InterviewSessionRuntimeSnapshotService runtimeSnapshotService = runtimeSnapshotServiceProvider.getIfAvailable();
+        if (runtimeSnapshotService != null) {
+            runtimeSnapshotService.initializeDraftSnapshot(session);
+        }
         return new InterviewSessionCreateRespDTO(session.getSessionId(), session.getStatus());
     }
 

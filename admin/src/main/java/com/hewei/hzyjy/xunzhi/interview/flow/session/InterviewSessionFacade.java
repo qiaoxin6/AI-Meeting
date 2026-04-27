@@ -17,6 +17,9 @@ import com.hewei.hzyjy.xunzhi.interview.api.io.resp.InterviewSessionCreateRespDT
 import com.hewei.hzyjy.xunzhi.interview.api.io.resp.InterviewSessionRestoreRespDTO;
 import com.hewei.hzyjy.xunzhi.interview.api.io.resp.RadarChartDTO;
 import com.hewei.hzyjy.xunzhi.interview.application.InterviewWorkflowService;
+import com.hewei.hzyjy.xunzhi.interview.application.runtime.InterviewSessionRuntimeRehydrateService;
+import com.hewei.hzyjy.xunzhi.interview.application.runtime.InterviewRuntimeRehydrateScope;
+import com.hewei.hzyjy.xunzhi.interview.application.runtime.InterviewSessionRuntimeSnapshotService;
 import com.hewei.hzyjy.xunzhi.interview.dao.entity.InterviewQuestion;
 import com.hewei.hzyjy.xunzhi.interview.dao.entity.InterviewSession;
 import com.hewei.hzyjy.xunzhi.interview.flow.report.InterviewResumePreviewService;
@@ -24,6 +27,7 @@ import com.hewei.hzyjy.xunzhi.interview.service.InterviewQuestionCacheService;
 import com.hewei.hzyjy.xunzhi.interview.service.InterviewQuestionService;
 import com.hewei.hzyjy.xunzhi.interview.service.InterviewRecordService;
 import com.hewei.hzyjy.xunzhi.interview.service.InterviewSessionService;
+import com.hewei.hzyjy.xunzhi.interview.service.model.InterviewRuntimeLoadMode;
 import com.hewei.hzyjy.xunzhi.interview.service.model.InterviewSessionStatus;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -44,6 +48,8 @@ public class InterviewSessionFacade {
     private final InterviewRecordService interviewRecordService;
     private final InterviewResumePreviewService interviewResumePreviewService;
     private final InterviewSessionService interviewSessionService;
+    private final InterviewSessionRuntimeSnapshotService runtimeSnapshotService;
+    private final InterviewSessionRuntimeRehydrateService runtimeRehydrateService;
 
     public InterviewSessionCreateRespDTO createSession(Long userId) {
         return interviewSessionService.createSession(userId);
@@ -101,6 +107,7 @@ public class InterviewSessionFacade {
                     response.getResumeFileUrl(),
                     response.getInterviewType()
             );
+            runtimeSnapshotService.refreshAfterQuestionExtraction(sessionId);
             return response;
         }
 
@@ -145,6 +152,7 @@ public class InterviewSessionFacade {
     public InterviewSessionRestoreRespDTO restoreInterviewSession(String sessionId, Long userId) {
         // 1) 先恢复会话主信息（状态、简历、方向等主字段）。
         InterviewSession session = interviewSessionService.requireOwnedSession(sessionId, userId);
+        runtimeRehydrateService.ensureRuntime(sessionId, InterviewRuntimeLoadMode.READ_ONLY, InterviewRuntimeRehydrateScope.MATERIAL_ONLY);
 
         InterviewSessionRestoreRespDTO response = new InterviewSessionRestoreRespDTO();
         response.setSessionId(sessionId);
@@ -190,6 +198,7 @@ public class InterviewSessionFacade {
 
     public Map<String, String> getSessionInterviewQuestions(String sessionId, Long userId) {
         interviewSessionService.requireOwnedSession(sessionId, userId);
+        runtimeRehydrateService.ensureRuntime(sessionId, InterviewRuntimeLoadMode.READ_ONLY, InterviewRuntimeRehydrateScope.MATERIAL_ONLY);
 
         Map<String, String> questions = interviewQuestionCacheService.getSessionInterviewQuestions(sessionId);
         if (questions == null || questions.isEmpty()) {
@@ -201,6 +210,7 @@ public class InterviewSessionFacade {
 
     public Integer getSessionTotalScore(String sessionId, Long userId) {
         interviewSessionService.requireOwnedSession(sessionId, userId);
+        runtimeRehydrateService.ensureRuntime(sessionId, InterviewRuntimeLoadMode.READ_ONLY, InterviewRuntimeRehydrateScope.SCORE_ONLY);
         // 分数读取顺序：缓存 > 记录快照，避免缓存丢失导致分数回退。
         Integer score = interviewQuestionCacheService.getSessionTotalScore(sessionId);
         if (score != null && score > 0) {
@@ -215,6 +225,7 @@ public class InterviewSessionFacade {
 
     public Map<String, String> getSessionInterviewSuggestions(String sessionId, Long userId) {
         interviewSessionService.requireOwnedSession(sessionId, userId);
+        runtimeRehydrateService.ensureRuntime(sessionId, InterviewRuntimeLoadMode.READ_ONLY, InterviewRuntimeRehydrateScope.MATERIAL_ONLY);
 
         Map<String, String> suggestions = interviewQuestionCacheService.getSessionInterviewSuggestions(sessionId);
         if (suggestions == null || suggestions.isEmpty()) {
@@ -226,6 +237,7 @@ public class InterviewSessionFacade {
 
     public Integer getSessionResumeScore(String sessionId, Long userId) {
         interviewSessionService.requireOwnedSession(sessionId, userId);
+        runtimeRehydrateService.ensureRuntime(sessionId, InterviewRuntimeLoadMode.READ_ONLY, InterviewRuntimeRehydrateScope.MATERIAL_ONLY);
 
         Integer resumeScore = interviewQuestionCacheService.getSessionResumeScore(sessionId);
         if (resumeScore == null) {
@@ -237,6 +249,7 @@ public class InterviewSessionFacade {
 
     public RadarChartDTO getRadarChartData(String sessionId, Long userId) {
         interviewSessionService.requireOwnedSession(sessionId, userId);
+        runtimeRehydrateService.ensureRuntime(sessionId, InterviewRuntimeLoadMode.READ_ONLY, InterviewRuntimeRehydrateScope.FULL_RUNTIME);
         RadarChartDTO radar = interviewQuestionCacheService.getRadarChartData(sessionId);
         if (hasRadarSignal(radar)) {
             return radar;

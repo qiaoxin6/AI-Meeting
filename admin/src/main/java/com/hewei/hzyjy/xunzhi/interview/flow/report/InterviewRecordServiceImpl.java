@@ -12,6 +12,9 @@ import com.hewei.hzyjy.xunzhi.common.convention.exception.ClientException;
 import com.hewei.hzyjy.xunzhi.common.enums.InterviewErrorCodeEnum;
 import com.hewei.hzyjy.xunzhi.interview.application.finalize.InterviewFinalizeLockService;
 import com.hewei.hzyjy.xunzhi.interview.application.InterviewSessionOwnershipService;
+import com.hewei.hzyjy.xunzhi.interview.application.runtime.InterviewSessionRuntimeRehydrateService;
+import com.hewei.hzyjy.xunzhi.interview.application.runtime.InterviewSessionRuntimeSnapshotService;
+import com.hewei.hzyjy.xunzhi.interview.application.runtime.InterviewRuntimeRehydrateScope;
 import com.hewei.hzyjy.xunzhi.interview.api.io.req.InterviewRecordPageReqDTO;
 import com.hewei.hzyjy.xunzhi.interview.api.io.req.InterviewRecordSaveReqDTO;
 import com.hewei.hzyjy.xunzhi.interview.api.io.resp.InterviewPlaybackItemRespDTO;
@@ -27,6 +30,7 @@ import com.hewei.hzyjy.xunzhi.interview.service.InterviewQuestionCacheService;
 import com.hewei.hzyjy.xunzhi.interview.service.InterviewQuestionService;
 import com.hewei.hzyjy.xunzhi.interview.service.InterviewRecordService;
 import com.hewei.hzyjy.xunzhi.interview.service.InterviewSessionService;
+import com.hewei.hzyjy.xunzhi.interview.service.model.InterviewRuntimeLoadMode;
 import com.hewei.hzyjy.xunzhi.interview.service.model.InterviewSessionStatus;
 import com.hewei.hzyjy.xunzhi.interview.service.model.InterviewTurnLog;
 import io.micrometer.core.instrument.Metrics;
@@ -62,6 +66,8 @@ public class InterviewRecordServiceImpl extends ServiceImpl<InterviewRecordMappe
     private final InterviewSessionService interviewSessionService;
     private final InterviewQuestionService interviewQuestionService;
     private final InterviewFinalizeLockService interviewFinalizeLockService;
+    private final InterviewSessionRuntimeSnapshotService runtimeSnapshotService;
+    private final InterviewSessionRuntimeRehydrateService runtimeRehydrateService;
 
     @Override
     public void saveInterviewRecord(String sessionId, Long userId, InterviewRecordSaveReqDTO requestParam) {
@@ -69,6 +75,7 @@ public class InterviewRecordServiceImpl extends ServiceImpl<InterviewRecordMappe
             throw new ClientException(InterviewErrorCodeEnum.SESSION_ID_EMPTY);
         }
         validateUserId(userId);
+        runtimeRehydrateService.ensureRuntime(sessionId, InterviewRuntimeLoadMode.READ_ONLY, InterviewRuntimeRehydrateScope.FULL_RUNTIME);
 
         InterviewRecordSaveReqDTO safeRequest = requestParam == null ? new InterviewRecordSaveReqDTO() : requestParam;
         InterviewSession session = interviewSessionOwnershipService.requireOwnedSession(sessionId, userId);
@@ -150,6 +157,7 @@ public class InterviewRecordServiceImpl extends ServiceImpl<InterviewRecordMappe
             baseMapper.updateById(record);
             log.info("Updated interview record, userId={}, sessionId={}", userId, sessionId);
         }
+        runtimeSnapshotService.refreshAfterFinalize(sessionId);
     }
 
     @Override
@@ -301,7 +309,7 @@ public class InterviewRecordServiceImpl extends ServiceImpl<InterviewRecordMappe
     }
 
     private Integer deriveScoreFromTurns(String sessionId) {
-        List<InterviewTurnLog> turns = interviewQuestionCacheService.getInterviewTurns(sessionId);
+        List<InterviewTurnLog> turns = runtimeSnapshotService.loadPersistedTurns(sessionId);
         if (turns == null || turns.isEmpty()) {
             return null;
         }
@@ -499,7 +507,7 @@ public class InterviewRecordServiceImpl extends ServiceImpl<InterviewRecordMappe
             String interviewDirection,
             String interviewStatus,
             String interviewSuggestions) {
-        List<InterviewTurnLog> turns = interviewQuestionCacheService.getInterviewTurns(session.getSessionId());
+        List<InterviewTurnLog> turns = runtimeSnapshotService.loadPersistedTurns(session.getSessionId());
         RadarChartDTO radarChart = interviewQuestionCacheService.getRadarChartData(session.getSessionId());
 
         Map<String, Object> snapshot = new LinkedHashMap<>();
@@ -544,7 +552,7 @@ public class InterviewRecordServiceImpl extends ServiceImpl<InterviewRecordMappe
 
         List<InterviewTurnLog> turns = parseTurnsFromSnapshot(snapshot);
         if (turns == null || turns.isEmpty()) {
-            turns = interviewQuestionCacheService.getInterviewTurns(sessionId);
+            turns = runtimeSnapshotService.loadPersistedTurns(sessionId);
         }
         respDTO.setPlaybackItems(buildPlaybackItems(turns));
         respDTO.setReviewFeedback(resolveReviewFeedback(snapshot, turns, radarChart, record));
