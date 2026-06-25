@@ -66,6 +66,11 @@ public class InterviewSessionRuntimeSnapshotService {
     @Autowired
     private InterviewSessionRuntimeHotRefreshCoordinator hotRefreshCoordinator;
 
+    /**
+     * 初始化草稿级别的运行态快照。
+     * 在面试会话创建时调用，为 hot/cold 快照建立初始版本。
+     * 如果已有快照则保留已有数据（如 recentTurns、scoreAggregate），仅升级版本号。
+     */
     public void initializeDraftSnapshot(InterviewSession session) {
         if (session == null || StrUtil.isBlank(session.getSessionId())) {
             return;
@@ -98,6 +103,9 @@ public class InterviewSessionRuntimeSnapshotService {
         }
     }
 
+    /**
+     * 查询完整的运行态快照（hot + cold 组装）。
+     */
     public Optional<InterviewSessionRuntimeSnapshot> findSnapshot(String sessionId) {
         if (StrUtil.isBlank(sessionId)) {
             return Optional.empty();
@@ -121,22 +129,39 @@ public class InterviewSessionRuntimeSnapshotService {
         return coldSnapshotRepository.findBySessionId(sessionId);
     }
 
+    /**
+     * 题目提取完成后，提交热刷新请求到协调器（异步）。
+     */
     public void refreshAfterQuestionExtraction(String sessionId) {
         hotRefreshCoordinator.submit(InterviewSessionRuntimeHotRefreshRequest.questionReady(sessionId));
     }
 
+    /**
+     * 仪态评估完成后，提交热刷新请求到协调器（异步）。
+     */
     public void refreshAfterDemeanorEvaluated(String sessionId) {
         hotRefreshCoordinator.submit(InterviewSessionRuntimeHotRefreshRequest.demeanorReady(sessionId));
     }
 
+    /**
+     * 候选人答案提交后，提交热刷新请求到协调器（异步）。
+     * 携带本轮对话日志 turnLog，用于更新快照中的轮次记录。
+     */
     public void refreshAfterAnswerCommitted(String sessionId, String requestId, InterviewTurnLog turnLog) {
         hotRefreshCoordinator.submit(InterviewSessionRuntimeHotRefreshRequest.answerCommitted(sessionId, requestId, turnLog));
     }
 
+    /**
+     * 面试流程终结后，提交热刷新请求到协调器（异步）。
+     */
     public void refreshAfterFinalize(String sessionId) {
         hotRefreshCoordinator.submit(InterviewSessionRuntimeHotRefreshRequest.finalized(sessionId));
     }
 
+    /**
+     * 同步刷新热快照：将热刷新请求中的变更写入数据库。
+     * 由协调器调度后调用，返回是否刷新成功。
+     */
     public boolean flushHotRefreshRequest(InterviewSessionRuntimeHotRefreshRequest request) {
         if (request == null) {
             return false;
@@ -150,6 +175,10 @@ public class InterviewSessionRuntimeSnapshotService {
         );
     }
 
+    /**
+     * 加载已持久化的对话轮次列表。
+     * 优先从归档表加载，其次从缓存加载，最后降级到快照中的 recentTurns。
+     */
     public List<InterviewTurnLog> loadPersistedTurns(String sessionId) {
         if (StrUtil.isBlank(sessionId)) {
             return new ArrayList<>();
@@ -171,6 +200,11 @@ public class InterviewSessionRuntimeSnapshotService {
                 .orElseGet(ArrayList::new);
     }
 
+    /**
+     * 查找可回放的对话轮次响应（用于软回放幂等）。
+     * 先按 requestId 匹配，再按 questionNumber + answerContent 的摘要匹配，
+     * 最后降级到归档表的最后一轮。
+     */
     public InterviewAnswerRespDTO findReplayResponse(
             String sessionId,
             String requestId,
@@ -201,6 +235,20 @@ public class InterviewSessionRuntimeSnapshotService {
         return turnArchiveRepository.findBySessionIdAndRequestId(sessionId, requestId);
     }
 
+    /**
+     * 核心方法：刷新热快照（CAS 乐观锁机制）。
+     *
+     * 流程：
+     * 1. 查询当前会话、题目、热快照、冷快照
+     * 2. 解析题目、建议、简历上下文、对话轮次、流程状态、分数聚合等数据
+     * 3. 构建热快照补丁（HotPatch）
+     * 4. 判断是否需要跳过更新（数据无变化）
+     * 5. 如果热快照不存在则初始化种子快照
+     * 6. 检查幂等性（同一 requestId 是否已处理）
+     * 7. 校验单调性（版本号、轮次序号只能递增）
+     * 8. 执行 CAS 更新，失败则重试（最多 3 次，带退避）
+     * 9. 每次成功后同步更新冷快照
+     */
     private boolean refreshSnapshot(
             String sessionId,
             String snapshotLevel,
@@ -211,28 +259,37 @@ public class InterviewSessionRuntimeSnapshotService {
             return false;
         }
         try {
+            // 获取会话和题目信息
             InterviewSession session = interviewSessionService.getBySessionId(sessionId);
             if (session == null) {
                 return false;
             }
             InterviewQuestion question = interviewQuestionService.getBySessionId(sessionId);
+            // CAS 乐观锁重试循环
             for (int attempt = 0; attempt < HOT_SNAPSHOT_CAS_MAX_RETRIES; attempt++) {
+                // 读取当前快照状态
                 InterviewSessionRuntimeHotSnapshot hotSnapshot = findHotSnapshot(sessionId).orElse(null);
                 InterviewSessionRuntimeColdSnapshot coldSnapshot = findColdSnapshot(sessionId).orElse(null);
                 InterviewSessionRuntimeSnapshot snapshot = assembleSnapshot(hotSnapshot, coldSnapshot);
 
+                // 解析本轮需要持久化的各类数据
                 Map<String, String> questions = resolveQuestions(sessionId, question);
                 Map<String, String> suggestions = resolveSuggestions(sessionId, question);
                 Map<String, Object> resumeContext = resolveResumeContext(sessionId, question);
+                // 持久化轮次归档（如果需要）并获取归档水位
                 Long archiveWatermark = persistTurnArchive
                         ? archiveTurn(sessionId, requestId, committedTurn, hotSnapshot == null ? null : hotSnapshot.getSnapshotVersion())
                         : resolveArchiveWatermark(hotSnapshot == null ? null : hotSnapshot.getArchiveWatermark(), sessionId);
+                // 合并所有对话轮次
                 List<InterviewTurnLog> turns = resolveTurns(sessionId, snapshot, committedTurn);
+                // 推导流程状态和分数聚合
                 InterviewFlowState flow = resolveFlow(sessionId, session, questions, turns);
                 InterviewRuntimeScoreAggregate scoreAggregate = resolveScoreAggregate(sessionId, turns);
+                // 截取最近 N 轮用于快照展示
                 List<InterviewTurnLog> recentTurns = limitRecentTurns(turns);
                 Date now = new Date();
                 String mutationId = normalizeMutationId(requestId);
+                // 构建热快照补丁
                 InterviewSessionRuntimeHotPatch hotPatch = buildHotPatch(
                         session,
                         snapshotLevel,
@@ -248,36 +305,43 @@ public class InterviewSessionRuntimeSnapshotService {
                         now
                 );
 
+                // 快照数据无变化，跳过热快照更新，仅更新冷快照
                 if (shouldSkipHotPatch(hotSnapshot, hotPatch)) {
                     applyColdSnapshotIfNecessary(sessionId, snapshotLevel, session, question, coldSnapshot, questions, suggestions, resumeContext, now);
                     return true;
                 }
 
+                // 热快照不存在，先初始化种子快照
                 if (hotSnapshot == null || hotSnapshot.getSnapshotVersion() == null) {
                     seedHotSnapshot(sessionId, session, snapshotLevel, now);
                     applyColdSnapshotIfNecessary(sessionId, snapshotLevel, session, question, coldSnapshot, questions, suggestions, resumeContext, now);
                     continue;
                 }
 
+                // 幂等检查：同一 requestId 已经处理过
                 if (isMutationAlreadyApplied(hotSnapshot, mutationId)) {
                     applyColdSnapshotIfNecessary(sessionId, snapshotLevel, session, question, coldSnapshot, questions, suggestions, resumeContext, now);
                     return true;
                 }
 
+                // 校验单调性（版本号、轮次序号必须递增）
                 validateHotPatchMonotonicity(hotSnapshot, hotPatch);
 
+                // CAS 乐观锁更新
                 boolean updated = hotSnapshotRepository.compareAndSetPatch(sessionId, hotSnapshot.getSnapshotVersion(), hotPatch);
                 if (updated) {
                     applyColdSnapshotIfNecessary(sessionId, snapshotLevel, session, question, coldSnapshot, questions, suggestions, resumeContext, now);
                     return true;
                 }
 
+                // CAS 失败，检查是否其他线程已经应用了本次变更
                 InterviewSessionRuntimeHotSnapshot latestSnapshot = findHotSnapshot(sessionId).orElse(null);
                 if (isMutationAlreadyApplied(latestSnapshot, mutationId)) {
                     applyColdSnapshotIfNecessary(sessionId, snapshotLevel, session, question, coldSnapshot, questions, suggestions, resumeContext, now);
                     return true;
                 }
 
+                // 退避后重试
                 backoffHotSnapshotRetry(attempt);
             }
             log.warn("Hot snapshot CAS retries exhausted, sessionId={}, snapshotLevel={}, requestId={}",
@@ -523,6 +587,9 @@ public class InterviewSessionRuntimeSnapshotService {
         return response;
     }
 
+    /**
+     * 组装完整快照：将热快照（运行态高频数据）和冷快照（低频基础材料）合并为一个视图对象。
+     */
     private InterviewSessionRuntimeSnapshot assembleSnapshot(
             InterviewSessionRuntimeHotSnapshot hotSnapshot,
             InterviewSessionRuntimeColdSnapshot coldSnapshot) {
@@ -804,6 +871,9 @@ public class InterviewSessionRuntimeSnapshotService {
                 .orElse(0L);
     }
 
+    /**
+     * 版本号递增工具方法：null 返回 1，否则 +1。
+     */
     private Long nextVersion(Long currentVersion) {
         return currentVersion == null ? 1L : currentVersion + 1L;
     }
