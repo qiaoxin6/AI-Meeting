@@ -38,6 +38,17 @@ import java.util.concurrent.TimeUnit;
  * 提供面试会话运行态的懒恢复与缓存重建能力，
  * 用于在 Redis 运行态缺失时按需从快照、报告和主数据中恢复题目流转与得分状态。
  *
+ * 核心职责：
+ * 1. 检查 Redis 中的运行态数据是否就绪（isRuntimeReady）
+ * 2. 如果未就绪，尝试从数据库快照恢复（rebuildRuntime）
+ * 3. 如果快照也不完整，从原始数据（InterviewSession、InterviewQuestion、InterviewRecord）重建
+ * 4. 将恢复/重建的数据写入 Redis 缓存，供后续请求使用
+ *
+ * 设计亮点：
+ * - 分布式锁保证同一 session 只有一个线程执行重建，其他线程等待（Follower 模式）
+ * - 支持多种 Scope（范围），按需恢复特定数据，避免不必要的计算
+ * - 多级降级：Redis → 快照 → 原始数据，保证数据可用性
+ *
  * @author 程序员牛肉
  */
 @Service
@@ -61,6 +72,17 @@ public class InterviewSessionRuntimeRehydrateService {
         return ensureRuntime(sessionId, loadMode, InterviewRuntimeRehydrateScope.FULL_RUNTIME);
     }
 
+    /**
+     * 确保运行态数据可用：优先使用 Redis 缓存，缺失时从快照或原始数据重建。
+     *
+     * 执行流程：
+     * 1. 检查 Redis 是否已有运行态数据 → 有则直接返回
+     * 2. 获取分布式锁，防止并发重建
+     * 3. 获取锁后再次检查（双重检查），可能其他线程已重建完成
+     * 4. 未获取到锁的线程进入等待模式（waitForRecoveredRuntime），最多等待 4 次 × 80ms
+     * 5. 等待无果后尝试获取短锁，再执行重建
+     * 6. 重建失败则返回只读视图
+     */
     public InterviewSessionRuntimeView ensureRuntime(
             String sessionId,
             InterviewRuntimeLoadMode loadMode,
@@ -72,19 +94,24 @@ public class InterviewSessionRuntimeRehydrateService {
         if (isRuntimeReady(sessionId, resolvedScope)) {
             return buildView(loadMode, InterviewRuntimeRestoreSource.CACHE, InterviewRuntimeConfidence.EXACT, false, getRuntimeSnapshot(sessionId));
         }
+        // 获取分布式锁，防止并发重建
         RLock lock = null;
         try {
             lock = runtimeLockService.acquire(sessionId);
+            // 未获取到锁 → 说明有其他线程正在重建，先等待一段时间
             if (lock == null) {
                 InterviewSessionRuntimeView reused = waitForRecoveredRuntime(sessionId, loadMode, resolvedScope);
                 if (reused != null) {
                     return reused;
                 }
+                // 等待无果，尝试获取短锁后自行重建
                 lock = runtimeLockService.acquire(sessionId, FOLLOWER_RECHECK_MILLIS);
             }
+            // 获取锁后再次检查（双重检查），可能等待期间其他线程已完成重建
             if (isRuntimeReady(sessionId, resolvedScope)) {
                 return buildView(loadMode, InterviewRuntimeRestoreSource.CACHE, InterviewRuntimeConfidence.EXACT, false, getRuntimeSnapshot(sessionId));
             }
+            // 执行重建逻辑
             InterviewSessionRuntimeView rebuilt = rebuildRuntime(sessionId, loadMode, resolvedScope);
             if (rebuilt != null) {
                 return rebuilt;
@@ -96,6 +123,7 @@ public class InterviewSessionRuntimeRehydrateService {
         } finally {
             runtimeLockService.release(lock);
         }
+        // 重建失败，返回只读视图
         return buildView(loadMode, InterviewRuntimeRestoreSource.NONE, InterviewRuntimeConfidence.READ_ONLY, false, getRuntimeSnapshot(sessionId));
     }
 
@@ -132,6 +160,14 @@ public class InterviewSessionRuntimeRehydrateService {
                 .build();
     }
 
+    /**
+     * 重建运行态数据：从快照或原始数据中恢复并写入 Redis 缓存。
+     *
+     * 降级策略：
+     * 1. 优先尝试从数据库快照恢复（快照已包含完整运行态数据）
+     * 2. 快照不完整时，从原始数据（Session、Question、Record）逐个字段重建
+     * 3. 如果连原始数据都没有，返回只读视图
+     */
     private InterviewSessionRuntimeView rebuildRuntime(
             String sessionId,
             InterviewRuntimeLoadMode loadMode,
@@ -148,6 +184,7 @@ public class InterviewSessionRuntimeRehydrateService {
             );
         }
 
+        // 快照不完整，从原始数据（Session、Question、Record）重建
         InterviewRecordDO record = getLatestRecord(sessionId);
         InterviewSession session = interviewSessionService.getBySessionId(sessionId);
         InterviewQuestion question = interviewQuestionService.getBySessionId(sessionId);
@@ -155,6 +192,7 @@ public class InterviewSessionRuntimeRehydrateService {
         if (material == null) {
             return buildView(loadMode, InterviewRuntimeRestoreSource.NONE, InterviewRuntimeConfidence.READ_ONLY, false, snapshot);
         }
+        // 如果要求题目数据但缺失，且必须读写模式，则标记为只读/终结状态
         if (requiresQuestionMaterial(scope) && !hasQuestionMaterial(material.questions)
                 && loadMode == InterviewRuntimeLoadMode.READ_WRITE_REQUIRED) {
             InterviewRuntimeConfidence confidence = isTerminalSession(session)
@@ -163,6 +201,7 @@ public class InterviewSessionRuntimeRehydrateService {
             writePartialMaterial(sessionId, material, confidence == InterviewRuntimeConfidence.TERMINAL, scope);
             return buildView(loadMode, resolveRestoreSource(record, question), confidence, true, snapshot);
         }
+        // 写入部分材料到缓存
         writePartialMaterial(sessionId, material, isTerminalSession(session), scope);
         return buildView(
                 loadMode,
@@ -198,6 +237,10 @@ public class InterviewSessionRuntimeRehydrateService {
         return material;
     }
 
+    /**
+     * Follower 等待模式：未获取到锁的线程轮询等待，检查其他线程是否已完成重建。
+     * 最多等待 4 次 × 80ms = 320ms，避免无限期等待。
+     */
     private InterviewSessionRuntimeView waitForRecoveredRuntime(
             String sessionId,
             InterviewRuntimeLoadMode loadMode,
@@ -218,6 +261,10 @@ public class InterviewSessionRuntimeRehydrateService {
                 : null;
     }
 
+    /**
+     * 检查快照是否包含 Scope 所需的所有数据，用于判断能否直接从快照恢复。
+     * 如果快照缺少任何必需字段，则返回 false，需要从原始数据重建。
+     */
     private boolean canRehydrateFromSnapshot(
             InterviewSessionRuntimeSnapshot snapshot,
             InterviewRuntimeRehydrateScope scope) {
@@ -255,6 +302,10 @@ public class InterviewSessionRuntimeRehydrateService {
         return scope.includesQuestionMaterial() || scope.includesFlow();
     }
 
+    /**
+     * 检查 Redis 中运行态数据是否已就绪，根据不同 Scope 检查不同的缓存 key。
+     * 这是判断是否需要重建的核心入口。
+     */
     private boolean isRuntimeReady(String sessionId, InterviewRuntimeRehydrateScope scope) {
         return switch (scope) {
             case FLOW_ONLY -> hasHashEntries(InterviewCacheKeys.questions(sessionId))
