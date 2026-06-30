@@ -65,6 +65,9 @@ public class AudioTranscriptionWebSocketHandler {
     private static final ConcurrentMap<String, TranscriptionSessionContext> TRANSCRIPTION_CONTEXTS = new ConcurrentHashMap<>();
     private static final ConcurrentMap<String, ScheduledFuture<?>> HEARTBEAT_TASKS = new ConcurrentHashMap<>();
 
+    /**
+     * WebSocket 连接建立回调：鉴权 → 注册会话映射 → 发送连接成功通知 → 启动心跳（30s 间隔）。
+     */
     @OnOpen
     public void onOpen(Session session, @PathParam("userId") String userId) {
         if (!isAuthorizedUser(session, userId)) {
@@ -82,6 +85,9 @@ public class AudioTranscriptionWebSocketHandler {
         startHeartbeat(session);
     }
 
+    /**
+     * 鉴权检查：调用 WebSocketAuthService 校验当前连接是否有权限使用该 userId。
+     */
     private boolean isAuthorizedUser(Session session, String pathUserId) {
         if (webSocketAuthService == null) {
             log.error("WebSocketAuthService is not injected, reject websocket connection");
@@ -103,6 +109,9 @@ public class AudioTranscriptionWebSocketHandler {
         }
     }
 
+    /**
+     * 处理文本控制消息（start_transcription / stop_transcription / ping / get_status）。
+     */
     @OnMessage
     public void onMessage(Session session, String message) {
         String userId = SESSION_USER_MAP.get(session.getId());
@@ -116,6 +125,9 @@ public class AudioTranscriptionWebSocketHandler {
         }
     }
 
+    /**
+     * 处理音频二进制数据：将音频块写入 PipedOutputStream，供讯飞 SDK 异步消费识别。
+     */
     @OnMessage
     public void onMessage(Session session, ByteBuffer byteBuffer) {
         String sessionId = session.getId();
@@ -144,6 +156,9 @@ public class AudioTranscriptionWebSocketHandler {
         }
     }
 
+    /**
+     * WebSocket 关闭回调：停止转写会话 → 取消心跳 → 清理用户/会话映射。
+     */
     @OnClose
     public void onClose(Session session, CloseReason closeReason) {
         String sessionId = session.getId();
@@ -174,6 +189,9 @@ public class AudioTranscriptionWebSocketHandler {
         sendMessage(session, createResponse("error", "WebSocket error: " + error.getMessage(), null));
     }
 
+    /**
+     * 路由控制命令到具体处理方法。
+     */
     private void handleControlMessage(Session session, String userId, WebSocketMessage message) {
         String type = message != null ? message.getType() : null;
         if (type == null) {
@@ -198,22 +216,29 @@ public class AudioTranscriptionWebSocketHandler {
         }
     }
 
+    /**
+     * 启动 30 秒间隔的心跳任务。
+     * 取消已有任务避免重复调度（如重连场景），同时防止 Nginx/负载均衡器因超时误杀连接。
+     */
     private void startHeartbeat(Session session) {
+        // 注入失败则跳过心跳（优雅降级）
         if (heartbeatExecutor == null) {
             log.warn("scheduledExecutorService is not injected, skip heartbeat, sessionId={}", session.getId());
             return;
         }
         String sessionId = session.getId();
+        // 先取消旧任务：防止同 session 多次启动心跳导致任务堆叠
         ScheduledFuture<?> oldTask = HEARTBEAT_TASKS.remove(sessionId);
         if (oldTask != null) {
             oldTask.cancel(true);
         }
-
+        // scheduleAtFixedRate(任务, 首次延迟, 间隔, 单位)：首次 30s 后执行，之后每 30s 一次
         ScheduledFuture<?> task = heartbeatExecutor.scheduleAtFixedRate(() -> {
             if (session.isOpen()) {
                 sendMessage(session, createResponse("heartbeat", "heartbeat", String.valueOf(System.currentTimeMillis())));
             }
         }, 30, 30, TimeUnit.SECONDS);
+        // 保存任务句柄到全局 Map，用于 onClose 时取消
         HEARTBEAT_TASKS.put(sessionId, task);
     }
 
@@ -224,21 +249,28 @@ public class AudioTranscriptionWebSocketHandler {
         }
     }
 
+    /**
+     * 启动语音转写会话：创建 PipedInputStream/PipedOutputStream 管道 → 调用讯飞 SDK →
+     * 通过异步回调将识别结果实时推送给客户端。用 putIfAbsent 防止并发重复启动。
+     */
     private void startTranscriptionSession(Session session, String userId) {
         String sessionId = session.getId();
+        // 快速检查：已有活跃且未请求停止的转写会话 → 直接返回
         TranscriptionSessionContext existing = TRANSCRIPTION_CONTEXTS.get(sessionId);
         if (existing != null && existing.active.get() && !existing.stopRequested.get()) {
             sendMessage(session, createResponse("transcription_already_started",
                     "Transcription is already started", null));
             return;
         }
-
+        // 清理旧会话（可能已标记停止但未完全清理）
         stopTranscriptionSession(sessionId);
-
+        // 创建管道 + 启动讯飞 SDK 异步识别
         TranscriptionSessionContext context = createAndStartTranscriptionSession(session, userId);
         if (context != null) {
+            // putIfAbsent 并发保护：如果另一个线程抢先注册了，这里会返回非 null
             TranscriptionSessionContext raced = TRANSCRIPTION_CONTEXTS.putIfAbsent(sessionId, context);
             if (raced != null && raced.active.get() && !raced.stopRequested.get()) {
+                // 并发冲突：另一个线程已启动 → 清理本次创建的冗余上下文
                 context.active.set(false);
                 context.stopRequested.set(true);
                 closeQuietly(context.audioOutputStream);
@@ -247,6 +279,7 @@ public class AudioTranscriptionWebSocketHandler {
                         "Transcription is already started", null));
                 return;
             }
+            // 无冲突（或旧上下文已被抢占）→ 用 put 覆盖，确保当前上下文生效
             TRANSCRIPTION_CONTEXTS.put(sessionId, context);
             sendMessage(session, createResponse("transcription_started", "Transcription started", null));
         } else {
@@ -254,6 +287,10 @@ public class AudioTranscriptionWebSocketHandler {
         }
     }
 
+    /**
+     * 创建管道并调用讯飞 SDK 启动实时语音识别，识别结果通过回调实时推送给客户端。
+     * 异步完成时推送最终结果或错误信息，并清理上下文。
+     */
     private TranscriptionSessionContext createAndStartTranscriptionSession(Session session, String userId) {
         String sessionId = session.getId();
         try {
@@ -261,29 +298,39 @@ public class AudioTranscriptionWebSocketHandler {
                 log.error("XunfeiAudioService is not injected yet, cannot start transcription. sessionId={}", sessionId);
                 return null;
             }
+            // 创建管道对：PipedOutputStream 写入端（WebSocket 音频入站线程写入）
+            //            PipedInputStream 读取端（讯飞 SDK 线程读取）
+            // 64KB 缓冲区，解耦生产者（客户端）和消费者（讯飞）
             PipedInputStream audioInputStream = new PipedInputStream(64 * 1024);
             PipedOutputStream audioOutputStream = new PipedOutputStream(audioInputStream);
             AtomicBoolean active = new AtomicBoolean(true);
             TranscriptionSessionContext context = new TranscriptionSessionContext(audioInputStream, audioOutputStream, active);
 
+            // 调用讯飞 SDK 启动实时语音识别，传入 audioInputStream 作为音频源
+            // 回调 lambda：每次收到部分识别结果时触发，实时推送给客户端
             CompletableFuture<String> future = xunfeiAudioService.realTimeAudioToText(audioInputStream, update ->
                     {
+                        // 保存最新识别快照（用于最终结果构建时合并元数据）
                         context.lastUpdate.set(update);
+                        // 实时推送部分识别结果：type="transcription", updateAction="replace"
                         sendMessage(session, createResponse("transcription", "Partial snapshot", update, true));
                     }
             );
-
+            // 异步回调：识别完成或异常时触发
             future.whenComplete((finalResult, throwable) -> {
                 if (throwable != null && !isExpectedStopException(context, throwable)) {
+                    // 非预期异常（非主动 stop 导致的管道关闭）→ 推送错误
                     log.error("Transcription failed, userId={}, sessionId={}", userId, sessionId, throwable);
                     sendMessage(session, createResponse("error", "Transcription failed: " + throwable.getMessage(), null));
                 } else {
                     log.info("Transcription finished, userId={}, sessionId={}", userId, sessionId);
+                    // 主动停止且无最终文本则跳过，否则推送最终结果
                     if (!context.stopRequested.get() && finalResult != null) {
                         sendMessage(session, createResponse("final", "Transcription completed",
                                 buildFinalUpdate(finalResult, context.lastUpdate.get()), true));
                     }
                 }
+                // 无论成功/失败/主动停止，都要清理管道和上下文
                 cleanupTranscriptionContext(sessionId, context);
             });
             return context;
@@ -293,6 +340,9 @@ public class AudioTranscriptionWebSocketHandler {
         }
     }
 
+    /**
+     * 停止语音转写会话：设置标志位 → 关闭 PipedOutputStream（触发管道中断）→ 最终会由讯飞 SDK 检测并退出。
+     */
     private boolean stopTranscriptionSession(String sessionId) {
         TranscriptionSessionContext context = TRANSCRIPTION_CONTEXTS.remove(sessionId);
         if (context == null) {
@@ -311,6 +361,10 @@ public class AudioTranscriptionWebSocketHandler {
         closeQuietly(context.audioInputStream);
     }
 
+    /**
+     * 判断异常是否为主动 close 导致的预期异常（Pipe closed / Stream closed），
+     * 避免将正常的停止操作误报为错误。
+     */
     private boolean isExpectedStopException(TranscriptionSessionContext context, Throwable throwable) {
         if (!context.stopRequested.get()) {
             return false;
@@ -347,6 +401,9 @@ public class AudioTranscriptionWebSocketHandler {
         }
     }
 
+    /**
+     * 向指定用户推送消息（静态方法，可从其他 Service 直接调用），用户离线则忽略。
+     */
     public static void sendMessageToUser(String userId, String type, String message, String data) {
         Session session = USER_SESSIONS.get(userId);
         if (session == null || !session.isOpen()) {
@@ -360,6 +417,9 @@ public class AudioTranscriptionWebSocketHandler {
         }
     }
 
+    /**
+     * 向所有在线用户广播消息。
+     */
     public static void broadcastMessage(String type, String message, String data) {
         String payload = createStaticResponse(type, message, data);
         USER_SESSIONS.forEach((userId, session) -> {
@@ -428,6 +488,9 @@ public class AudioTranscriptionWebSocketHandler {
         return JSON.toJSONString(response);
     }
 
+    /**
+     * 构建最终的识别结果快照：以 finalResult 作为 fullText/committedText，保留上次更新的辅助元数据。
+     */
     private RealtimeTranscriptionUpdate buildFinalUpdate(String finalResult,
                                                          RealtimeTranscriptionUpdate lastUpdate) {
         if (lastUpdate == null) {

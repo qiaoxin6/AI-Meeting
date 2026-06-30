@@ -68,6 +68,7 @@ public class XunfeiAudioService {
     @PostConstruct
     public void init() {
         try {
+            // 初始化讯飞 IAT（语音听写）客户端，dwa="wpgs" 开启动态分词
             iatClient = new IatClient.Builder()
                     .signature(
                             normalize(xunfeiLatPropertiesConfig.getAppId()),
@@ -87,6 +88,10 @@ public class XunfeiAudioService {
         }
     }
 
+    /**
+     * 文件转写（离线模式）：将上传的音频文件转为文本。
+     * 流程：临时保存文件 → 通过 IAT 客户端发送 → 异步等待结果 → 清理临时文件。
+     */
     public CompletableFuture<String> convertAudioToText(MultipartFile audioFile) {
         CompletableFuture<String> future = new CompletableFuture<>();
         CountDownLatch latch = new CountDownLatch(1);
@@ -147,8 +152,11 @@ public class XunfeiAudioService {
     }
 
     /**
-     * Realtime transcription for the large-model ASR endpoint.
-     * Docs: /doc/spark/asr_llm/rtasr_llm.html
+     * 实时语音转写（流式模式）：通过 AST WebSocket 将音频流实时发送给讯飞大模型 ASR，
+     * 识别结果通过 callback 实时推送，最终结果通过 CompletableFuture 返回。
+     *
+     * 数据流：audioInputStream → 1280 字节分块 → WebSocket 发送
+     *        WebSocket 接收 → JSON 解析 → Assembler 拼接 → callback 推送
      */
     public CompletableFuture<String> realTimeAudioToText(InputStream audioInputStream, AudioResultCallback callback) {
         CompletableFuture<String> future = new CompletableFuture<>();
@@ -379,6 +387,20 @@ public class XunfeiAudioService {
         upsertAstSegment(sentencePool, sn, text, finalized);
     }
 
+    /**
+     * 无 pgs 模式下的 AST 片段合并：基于 bg/ed 字符位置范围进行智能合并。
+     *
+     * 为什么需要无 pgs 模式？
+     * 讯飞大模型 ASR 有两种结果格式：
+     *   - 有 pgs（rpl/apd）：明确告诉你怎么替换/追加片段，直接按指令操作即可
+     *   - 无 pgs：只给出 bg/ed（字符起止位置）和文本，需要自己判断是新增还是更新已有片段
+     *
+     * 决策链（按优先级）：
+     *   1. bg/ed 为空 → 直接按 segmentId 插入，不做智能合并
+     *   2. 精确 bg/ed 匹配 + 纯标点 → 追加标点到已有片段末尾
+     *   3. 找到可复用的重叠片段（≥60% 范围重叠 + 文本相似）→ 更新该片段 + 清除被覆盖的冗余片段
+     *   4. 找不到可复用 → 清除被覆盖的冗余片段 + 作为新片段插入
+     */
     private void applyAstSegmentWithoutPgs(TreeMap<Integer, SegmentState> sentencePool,
                                            int sn,
                                            Integer bg,
@@ -388,12 +410,13 @@ public class XunfeiAudioService {
         if (sentencePool == null || text == null) {
             return;
         }
-
+        // 策略1：无位置范围 → 退化为简单 upsert，按 segmentId 直接覆盖
         if (bg == null || ed == null) {
             upsertAstSegment(sentencePool, sn, text, finalized);
             return;
         }
-
+        // 策略2：找到 bg/ed 完全一致的已有片段，且新文本只是标点 → 追加标点到已有文本末尾
+        // 典型场景：讯飞先返回"你好"，再返回"。"，这是同一句话的标点补充
         SegmentState sameRange = findExactRangeState(sentencePool, bg, ed);
         if (sameRange != null && isPunctuationOnly(text) && StrUtil.isNotBlank(sameRange.text)) {
             sameRange.text = appendTrailingPunctuation(sameRange.text, text);
@@ -401,14 +424,15 @@ public class XunfeiAudioService {
             sameRange.updatedAt = System.currentTimeMillis();
             return;
         }
-
+        // 策略3：查找可复用的重叠片段（范围有重叠 + 文本高度相似）
         SegmentState reusable = findReusableRangeState(sentencePool, bg, ed, text);
         if (reusable != null) {
+            // 找到可复用 → 更新文本 + 清除被该范围完全覆盖的冗余兄弟片段
             updateSegmentState(reusable, text, finalized, bg, ed);
             removeCoveredSiblingRangeStates(sentencePool, reusable.segId, bg, ed, text);
             return;
         }
-
+        // 策略4：找不到任何可复用片段 → 清除被覆盖的旧片段，作为全新片段插入
         removeCoveredSiblingRangeStates(sentencePool, null, bg, ed, text);
         upsertAstSegment(sentencePool, sn, text, finalized);
         SegmentState state = sentencePool.get(sn);
@@ -433,6 +457,10 @@ public class XunfeiAudioService {
         return null;
     }
 
+    /**
+     * 查找可复用的历史片段：遍历 sentencePool，找到与当前 bg/ed 范围重叠且文本高度相似（≥60% 重叠率 + 80% 公共前缀）的片段。
+     * 这是无 pgs 模式下避免重复创建片段的智能合并核心。
+     */
     private SegmentState findReusableRangeState(TreeMap<Integer, SegmentState> sentencePool,
                                                 Integer bg,
                                                 Integer ed,
@@ -650,6 +678,10 @@ public class XunfeiAudioService {
         return result.toString();
     }
 
+    /**
+     * 将音频输入流按 1280 字节分块发送到 AST WebSocket，每 40ms 发送一块以模拟实时语速。
+     * 发送完毕后发送结束标记 {"end":true}。
+     */
     private void sendAudioStream(WebSocket webSocket,
                                  InputStream audioInputStream,
                                  String sessionId,
@@ -674,6 +706,10 @@ public class XunfeiAudioService {
         }
     }
 
+    /**
+     * 构建 AST WebSocket 连接 URL：按字母序排列参数 → HMAC-SHA1 签名 → Base64 编码。
+     * 包含 appId、sessionId、utc 时间戳等鉴权字段。
+     */
     private String buildAstUrl(String appId, String apiKey, String apiSecret, String sessionId) throws Exception {
         TreeMap<String, String> params = new TreeMap<>();
         params.put("appId", appId);
@@ -775,6 +811,18 @@ public class XunfeiAudioService {
         return st != null && Boolean.TRUE.equals(st.getBoolean("ls"));
     }
 
+    /**
+     * AST 转写结果组装器：将讯飞返回的增量片段（带 segmentId/pgs/rg/bg/ed）拼装成完整文本。
+     * 支持三种操作模式：
+     *   - rpl（替换）：按 rg 范围删除旧片段，插入新片段
+     *   - apd（追加）：直接插入/覆盖指定 segmentId
+     *   - 无 pgs：按 bg/ed 字符位置范围进行智能合并（基于文本相似度和范围重叠率）
+     *
+     * 最终输出分层文本：
+     *   - fullText/displayText：当前完整拼接结果
+     *   - committedText：已确认不变的部分（finalized 或 segmentId < 当前片段）
+     *   - liveText：实时变化的部分（displayText - committedText），供前端高亮展示
+     */
     private final class AstTranscriptionAssembler {
         private final TreeMap<Integer, SegmentState> segments = new TreeMap<>();
 
@@ -900,6 +948,9 @@ public class XunfeiAudioService {
         }
     }
 
+    /**
+     * 回调接口：实时识别结果通过此接口推送给调用方。
+     */
     public interface AudioResultCallback {
         void onResult(RealtimeTranscriptionUpdate result);
     }
