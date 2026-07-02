@@ -209,7 +209,20 @@ public class InterviewAnswerPipeline {
         return true;
     }
 
+    /**
+     * Pipeline 步骤：加载当前题目上下文。
+     *
+     * 执行顺序：
+     *   1) 确保运行态可用（Redis 缺失时自动重建）
+     *   2) 获取当前流程状态（flow）
+     *   3) 检查流程是否已完成或超出范围
+     *   4) 解析当前题号和题目内容
+     *   5) 校验请求中的题号与当前流程一致（防重复提交过期题目）
+     *
+     * @return true 继续下一步，false 终止并返回错误响应
+     */
     private boolean stepLoadCurrentQuestion(InterviewAnswerPipelineContext ctx) {
+        // 1) 确保运行态可用：Redis 缺失时自动从快照重建，失败则返回只读错误
         InterviewSessionRuntimeView runtimeView = runtimeRehydrateService.ensureRuntime(
                 ctx.sessionId,
                 InterviewRuntimeLoadMode.READ_WRITE_REQUIRED,
@@ -219,16 +232,22 @@ public class InterviewAnswerPipeline {
             ctx.response.fail("interview runtime restored as read-only");
             return false;
         }
+
+        // 2) 获取流程状态：初始化或从缓存加载
         ctx.flowState = ensureInterviewFlow(ctx.sessionId);
         if (ctx.flowState == null) {
             ctx.response.fail("interview flow not initialized");
             return false;
         }
+
+        // 3) 检查流程是否已完成：已完成则返回总分并结束
         if (interviewFlowStateMachine.isCompleted(ctx.flowState)) {
             ctx.response.setTotalScore(interviewQuestionCacheService.getSessionTotalScore(ctx.sessionId));
             ctx.response.finish().success();
             return false;
         }
+
+        // 4) 检查流程是否超出范围：索引 >= 总题数时标记完成
         if (interviewFlowStateMachine.isOutOfRange(ctx.flowState)) {
             interviewFlowStateMachine.markCompleted(ctx.sessionId);
             ctx.response.setTotalScore(interviewQuestionCacheService.getSessionTotalScore(ctx.sessionId));
@@ -236,6 +255,7 @@ public class InterviewAnswerPipeline {
             return false;
         }
 
+        // 5) 解析当前题号和题目内容：缓存优先 + DB 兜底
         ctx.currentQuestionNumber = interviewFlowStateMachine.currentQuestionNumber(ctx.flowState);
         ctx.currentQuestion = getQuestionWithReload(ctx.sessionId, ctx.currentQuestionNumber);
         if (StrUtil.isBlank(ctx.currentQuestion)) {
@@ -243,10 +263,13 @@ public class InterviewAnswerPipeline {
             return false;
         }
 
+        // 6) 填充追问题相关上下文
         ctx.currentIsFollowUp = isFollowUpQuestion(ctx.currentQuestionNumber);
         ctx.currentFollowUpCount = resolveFollowUpCount(ctx.flowState, ctx.currentQuestionNumber);
         ctx.maxFollowUp = resolveMaxFollowUp(ctx.flowState);
         ctx.response.withCurrentQuestion(ctx.currentQuestionNumber, ctx.currentQuestion);
+
+        // 7) 防重放校验：请求中的题号必须与当前流程一致，否则拒绝（用户可能提交了过期题目的答案）
         if (!isRequestedQuestionCurrent(ctx.requestParam.getQuestionNumber(), ctx.currentQuestionNumber)) {
             Metrics.counter("stale_question_reject_total").increment();
             recordAnswerPipelineFailure("stale_question_reject");

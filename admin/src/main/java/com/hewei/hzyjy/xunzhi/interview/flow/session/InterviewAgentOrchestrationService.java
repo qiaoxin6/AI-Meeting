@@ -28,7 +28,8 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Interview orchestration service, including main-question and follow-up restoration.
+ * 面试 Agent 编排服务：作为对外 API 的统一入口，协调题目提取、答案处理、流程状态管理、仪态评估等子系统。
+ * 核心职责：获取当前题目（含 Redis 丢失后的三级恢复链）、答题流程编排、面试流程状态重建。
  */
 @Service
 @RequiredArgsConstructor
@@ -43,26 +44,41 @@ public class InterviewAgentOrchestrationService implements InterviewWorkflowServ
     private final InterviewQuestionLockService interviewQuestionLockService;
     private final InterviewSessionRuntimeRehydrateService runtimeRehydrateService;
 
+    /**
+     * 提取面试题目：从简历中解析并生成面试题目列表。
+     * 直接委托给 InterviewQuestionExtractionService 处理。
+     */
     public InterviewQuestionRespDTO extractInterviewQuestions(InterviewQuestionReqDTO reqDTO) {
         // 编排入口：提取链路直接委托 extraction flow。
         return interviewQuestionExtractionService.extractInterviewQuestions(reqDTO);
     }
 
+    /**
+     * 提交面试答案：统一走 AnswerPipeline 执行完整的答题链路。
+     * 避免控制逻辑分散在多个 service 中，保持编排的单一入口。
+     */
     public InterviewAnswerRespDTO answerInterviewQuestion(String sessionId, InterviewAnswerReqDTO requestParam) {
         // 编排入口：答题链路统一走 pipeline，避免控制逻辑分散在多个 service。
         return interviewAnswerPipeline.execute(sessionId, requestParam);
     }
 
+    /**
+     * 获取下一题：实际复用 getCurrentQuestion，返回当前流程游标指向的题目。
+     * 注意：此方法不推进游标，只是获取当前题目。
+     */
     public InterviewAnswerRespDTO getNextQuestion(String sessionId) {
         return getCurrentQuestion(sessionId);
     }
 
     /**
-     * Resolve current question by sessionId without moving the flow cursor.
-     * Priority:
-     * 1) flow state in Redis
-     * 2) latest turn log recovery
-     * 3) fallback to first question
+     * 获取当前题目（不推进流程游标）。
+     *
+     * 三级容灾恢复链：
+     *   1) Redis 缓存直接命中 flow → 返回当前题号对应的题目
+     *   2) flow 丢失时从最近对话轮次（turns）恢复题号 → 重建 flow 并推进到目标题
+     *   3) turns 也为空 → 重新初始化 flow，回到第一题
+     *
+     * 典型场景：用户刷新页面、断线重连时需要知道当前面试进行到第几题。
      */
     public InterviewAnswerRespDTO getCurrentQuestion(String sessionId) {
         InterviewAnswerRespDTO response = InterviewAnswerRespDTO.init();
@@ -130,10 +146,17 @@ public class InterviewAgentOrchestrationService implements InterviewWorkflowServ
         }
     }
 
+    /**
+     * 仪态评估入口：对面试过程中用户的仪态（表情、动作等）进行评估。
+     * 直接委托给 InterviewDemeanorService 处理。
+     */
     public String evaluateDemeanor(DemeanorEvaluationReqDTO reqDTO) {
         return interviewDemeanorService.evaluateDemeanor(reqDTO);
     }
 
+    /**
+     * 组装当前题目响应体：填充当前题目内容、下一题信息、追问题标志、总分。
+     */
     private void fillCurrentQuestionResponse(
             String sessionId,
             InterviewAnswerRespDTO response,
@@ -150,6 +173,11 @@ public class InterviewAgentOrchestrationService implements InterviewWorkflowServ
         response.setTotalScore(interviewQuestionCacheService.getSessionTotalScore(sessionId));
     }
 
+    /**
+     * 获取面试题目列表：缓存优先，缓存 miss 时从 DB 回补并加载到缓存。
+     *
+     * @return 题目 Map（题号 → 题目内容），可能为空
+     */
     private Map<String, String> getOrLoadQuestions(String sessionId) {
         Map<String, String> questions = interviewQuestionCacheService.getSessionInterviewQuestions(sessionId);
         if (questions == null || questions.isEmpty()) {
@@ -159,6 +187,14 @@ public class InterviewAgentOrchestrationService implements InterviewWorkflowServ
         return questions;
     }
 
+    /**
+     * 按题号解析题目内容：先查本地 Map，再查 Redis 缓存，支持归一化前后的题号双重查找。
+     *
+     * @param sessionId      会话ID
+     * @param questionNumber 原始题号（如 "3-F2"）
+     * @param questions      题目 Map（题号 → 题目内容）
+     * @return 题目内容，找不到返回 null
+     */
     private String resolveQuestionByNumber(String sessionId, String questionNumber, Map<String, String> questions) {
         String normalizedQuestionNumber = normalizeQuestionNumber(questionNumber);
         if (StrUtil.isBlank(normalizedQuestionNumber)) {
@@ -178,6 +214,16 @@ public class InterviewAgentOrchestrationService implements InterviewWorkflowServ
         return questionContent;
     }
 
+    /**
+     * 从对话轮次恢复当前题目（Redis flow 丢失时的降级策略）。
+     *
+     * 按优先级尝试：
+     *   1) latestTurn.finished == true → 面试已结束
+     *   2) latestTurn.nextQuestionNumber 有值 → 直接恢复该题
+     *   3) latestTurn.nextQuestion 有内容 → 通过内容匹配题号后恢复
+     *   4) lastTurn 的主问题号 + 1 → 恢复下一题
+     *   5) 以上都失败 → 返回 empty，走 getCurrentQuestion 的第三级兜底（reinit flow）
+     */
     private CurrentQuestionState recoverCurrentQuestionFromTurns(String sessionId, Map<String, String> questions) {
         List<InterviewTurnLog> turns = interviewQuestionCacheService.getInterviewTurns(sessionId);
         if (turns == null || turns.isEmpty()) {
@@ -224,6 +270,15 @@ public class InterviewAgentOrchestrationService implements InterviewWorkflowServ
         return CurrentQuestionState.empty();
     }
 
+    /**
+     * 重建 flow 状态并推进到目标题号（分布式锁保护）。
+     *
+     * 步骤：
+     *   1) 按 sessionId + questionNumber 获取分布式锁，防并发重建
+     *   2) 双重检查：其他线程可能已重建完成
+     *   3) 初始化 flow → 循环推进主问题游标到目标题 → 补齐 followUp 次数
+     *   4) 如果获取锁失败，直接返回当前 flow 状态
+     */
     private InterviewFlowState restoreFlowToQuestion(String sessionId, String questionNumber, int totalQuestions) {
         if (StrUtil.isBlank(sessionId) || StrUtil.isBlank(questionNumber) || totalQuestions <= 0) {
             return null;
@@ -271,6 +326,9 @@ public class InterviewAgentOrchestrationService implements InterviewWorkflowServ
         }
     }
 
+    /**
+     * 通过题目内容匹配题号：先匹配主问题，再匹配追问题。
+     */
     private String matchQuestionNumberByContent(String sessionId, String questionContent, Map<String, String> questions) {
         String matchedMainQuestionNumber = matchQuestionNumberByContent(questionContent, questions);
         if (StrUtil.isNotBlank(matchedMainQuestionNumber)) {
@@ -280,6 +338,13 @@ public class InterviewAgentOrchestrationService implements InterviewWorkflowServ
         return matchQuestionNumberByContent(questionContent, followUpQuestions);
     }
 
+    /**
+     * 通过题目内容精确匹配题号（重载版本，不区分主问题/追问题）。
+     *
+     * @param questionContent 题目内容文本
+     * @param questions       题目 Map
+     * @return 匹配到的题号，未匹配返回 null
+     */
     private String matchQuestionNumberByContent(String questionContent, Map<String, String> questions) {
         if (StrUtil.isBlank(questionContent) || questions == null || questions.isEmpty()) {
             return null;
@@ -296,6 +361,9 @@ public class InterviewAgentOrchestrationService implements InterviewWorkflowServ
         return null;
     }
 
+    /**
+     * 安全解析正整数字符串，为空/非数字/非正数返回 null。
+     */
     private Integer parsePositiveInt(String value) {
         if (StrUtil.isBlank(value)) {
             return null;
@@ -308,11 +376,17 @@ public class InterviewAgentOrchestrationService implements InterviewWorkflowServ
         }
     }
 
+    /**
+     * 提取主问题编号：如 "3-F2" → 3，"5" → 5。
+     */
     private Integer extractMainQuestionNo(String questionNumber) {
         String mainQuestionNumber = resolveMainQuestionNumber(questionNumber);
         return parsePositiveInt(mainQuestionNumber);
     }
 
+    /**
+     * 解析追问题次数：优先从题号中提取（如 "3-F2" → 2），提取不到则从 flowState 获取。
+     */
     private Integer resolveFollowUpCount(InterviewFlowState flowState, String questionNumber) {
         if (!isFollowUpQuestion(questionNumber)) {
             return 0;
@@ -327,10 +401,16 @@ public class InterviewAgentOrchestrationService implements InterviewWorkflowServ
         return 0;
     }
 
+    /**
+     * 判断题号是否为追问题格式（如 "3-F2" 匹配 \\d+-F\\d+）。
+     */
     private boolean isFollowUpQuestion(String questionNumber) {
         return StrUtil.isNotBlank(questionNumber) && questionNumber.trim().matches("\\d+-F\\d+");
     }
 
+    /**
+     * 从追问题号中提取追问题序号（如 "3-F2" → 2，"5-F1" → 1）。
+     */
     private int extractFollowUpCount(String questionNumber) {
         if (!isFollowUpQuestion(questionNumber)) {
             return 0;
@@ -346,6 +426,9 @@ public class InterviewAgentOrchestrationService implements InterviewWorkflowServ
         }
     }
 
+    /**
+     * 解析主问题号：从题号中提取主问题部分（"3-F2" → "3"，"5" → "5"）。
+     */
     private String resolveMainQuestionNumber(String questionNumber) {
         if (StrUtil.isBlank(questionNumber)) {
             return null;
